@@ -1,9 +1,9 @@
 import discord
 import os
+import asyncio
 from discord.ext import commands
 from discord.ui import View, Button
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from aiohttp import web
 
 TOKEN = os.getenv('BOT_TOKEN')
 URL_SAYTA = "https://denis123-botg.github.io/sirion_forms/"
@@ -11,25 +11,21 @@ ADMIN_CHANNEL_ID = 1216754939616039014
 ROLE_ID = 1259828977942528111
 IN_PROGRESS_ROLE_ID = 1259813357763170394
 
-# --- МАКСИМАЛЬНО ПРОСТАЯ ОБМАНКА ---
-class SimpleHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'text/html')
-        self.end_headers()
-        self.wfile.write(b"OK")
-    def log_message(self, format, *args): return
+# --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
+async def handle(request):
+    return web.Response(text="Бот активен!")
 
-def run_web_server():
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
     port = int(os.getenv("PORT", 10000))
-    server = HTTPServer(('0.0.0.0', port), SimpleHandler)
-    print(f"Web server active on port {port}")
-    server.serve_forever()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    print(f"Веб-сервер запущен на порту {port}")
 
-# Запускаем веб-сервер в отдельном потоке СРАЗУ
-threading.Thread(target=run_web_server, daemon=True).start()
-# ----------------------------------
-
+# --- ЛОГИКА КНОПОК ---
 class AdminAction(View):
     def __init__(self, uid):
         super().__init__(timeout=None)
@@ -38,26 +34,15 @@ class AdminAction(View):
     async def ok(self, inter, btn):
         m = inter.guild.get_member(int(self.uid))
         if m:
-            r_done = inter.guild.get_role(ROLE_ID)
-            r_prog = inter.guild.get_role(IN_PROGRESS_ROLE_ID)
+            r_done, r_prog = inter.guild.get_role(ROLE_ID), inter.guild.get_role(IN_PROGRESS_ROLE_ID)
             if r_prog in m.roles: await m.remove_roles(r_prog)
             await m.add_roles(r_done)
             await inter.response.send_message(f"✅ <@{self.uid}> принят!", ephemeral=True)
-        else:
-            await inter.response.send_message("❌ Игрок не найден", ephemeral=True)
-
-    @discord.ui.button(label="Отказать ❌", style=discord.ButtonStyle.red)
-    async def no(self, inter, btn):
-        m = inter.guild.get_member(int(self.uid))
-        if m:
-            r_prog = inter.guild.get_role(IN_PROGRESS_ROLE_ID)
-            if r_prog in m.roles: await m.remove_roles(r_prog)
-        await inter.response.send_message("❌ Отказано", ephemeral=True)
 
 class PersistentView(View):
     def __init__(self):
         super().__init__(timeout=None)
-    @discord.ui.button(label="Заполнить анкету 📝", style=discord.ButtonStyle.gray, custom_id="reg_start_final_v6")
+    @discord.ui.button(label="Заполнить анкету 📝", style=discord.ButtonStyle.gray, custom_id="reg_button_fixed")
     async def start(self, inter, btn):
         r_prog = inter.guild.get_role(IN_PROGRESS_ROLE_ID)
         if r_prog and r_prog not in inter.user.roles:
@@ -78,9 +63,7 @@ bot = MyBot()
 @bot.event
 async def on_member_join(member):
     role = member.guild.get_role(IN_PROGRESS_ROLE_ID)
-    if role: 
-        try: await member.add_roles(role)
-        except: pass
+    if role: await member.add_roles(role)
 
 @bot.command()
 async def установка(ctx):
@@ -97,6 +80,15 @@ async def on_message(msg):
         except: pass
     await bot.process_commands(msg)
 
-if TOKEN:
-    bot.run(TOKEN)
-    
+async def main():
+    # Запускаем и сервер, и бота вместе
+    await start_web_server()
+    async with bot:
+        await bot.start(TOKEN)
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
+        
