@@ -59,4 +59,45 @@ class PersistentView(View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(label="Заполнить анкету 📝", style=discord.ButtonStyle.gray, custom
+    @discord.ui.button(label="Заполнить анкету 📝", style=discord.ButtonStyle.gray, custom_id="reg_start_v4")
+    async def start(self, inter, btn):
+        role_progress = inter.guild.get_role(IN_PROGRESS_ROLE_ID)
+        # Выдаем роль сразу при нажатии
+        if role_progress and role_progress not in inter.user.roles:
+            await inter.user.add_roles(role_progress)
+            
+        link = f"{URL_SAYTA}?uid={inter.user.id}"
+        v = View().add_item(Button(label="Открыть анкету", url=link))
+        await inter.response.send_message("Вам выдана роль кандидата. Заполните анкету по ссылке:", view=v, ephemeral=True)
+
+class MyBot(commands.Bot):
+    def __init__(self):
+        super().__init__(command_prefix="!", intents=discord.Intents.all())
+    async def setup_hook(self):
+        self.add_view(PersistentView())
+
+bot = MyBot()
+
+@bot.command()
+async def установка(ctx):
+    await ctx.send("**Регистрация на сервере**\nНажмите кнопку ниже, чтобы получить роль кандидата и заполнить анкету:", view=PersistentView())
+
+@bot.event
+async def on_message(msg):
+    if msg.channel.id == ADMIN_CHANNEL_ID and msg.author.bot and msg.embeds:
+        try:
+            footer = msg.embeds[0].footer.text
+            if footer and "ID:" in footer:
+                uid = "".join(filter(str.isdigit, footer))
+                await msg.channel.send(f"Управление анкетой игрока <@{uid}>:", view=AdminAction(uid))
+        except: pass
+    await bot.process_commands(msg)
+
+async def main():
+    asyncio.create_task(run_server())
+    async with bot:
+        await bot.start(TOKEN)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+    
