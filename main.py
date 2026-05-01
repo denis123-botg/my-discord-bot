@@ -3,8 +3,7 @@ import os
 from discord.ext import commands
 from discord.ui import View, Button
 import threading
-from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-import asyncio
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 TOKEN = os.getenv('BOT_TOKEN')
 URL_SAYTA = "https://denis123-botg.github.io/sirion_forms/"
@@ -12,23 +11,23 @@ ADMIN_CHANNEL_ID = 1216754939616039014
 ROLE_ID = 1259828977942528111
 IN_PROGRESS_ROLE_ID = 1259813357763170394
 
-# --- НАДЕЖНАЯ ОБМАНКА ДЛЯ RENDER ---
-class HealthCheckHandler(BaseHTTPRequestHandler):
+# --- МАКСИМАЛЬНО ПРОСТАЯ ОБМАНКА ---
+class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header('Content-type', 'text/html')
         self.end_headers()
-        self.wfile.write(b"Bot is online")
-    def log_message(self, format, *args): return # Чтобы не спамить в консоль
+        self.wfile.write(b"OK")
+    def log_message(self, format, *args): return
 
-def run_health_server():
+def run_web_server():
     port = int(os.getenv("PORT", 10000))
-    server = ThreadingHTTPServer(('0.0.0.0', port), HealthCheckHandler)
-    print(f"Health check server started on port {port}")
+    server = HTTPServer(('0.0.0.0', port), SimpleHandler)
+    print(f"Web server active on port {port}")
     server.serve_forever()
 
-# Запускаем сервер в отдельном потоке сразу
-threading.Thread(target=run_health_server, daemon=True).start()
+# Запускаем веб-сервер в отдельном потоке СРАЗУ
+threading.Thread(target=run_web_server, daemon=True).start()
 # ----------------------------------
 
 class AdminAction(View):
@@ -39,10 +38,10 @@ class AdminAction(View):
     async def ok(self, inter, btn):
         m = inter.guild.get_member(int(self.uid))
         if m:
-            role_done = inter.guild.get_role(ROLE_ID)
-            role_prog = inter.guild.get_role(IN_PROGRESS_ROLE_ID)
-            if role_prog in m.roles: await m.remove_roles(role_prog)
-            await m.add_roles(role_done)
+            r_done = inter.guild.get_role(ROLE_ID)
+            r_prog = inter.guild.get_role(IN_PROGRESS_ROLE_ID)
+            if r_prog in m.roles: await m.remove_roles(r_prog)
+            await m.add_roles(r_done)
             await inter.response.send_message(f"✅ <@{self.uid}> принят!", ephemeral=True)
         else:
             await inter.response.send_message("❌ Игрок не найден", ephemeral=True)
@@ -51,25 +50,26 @@ class AdminAction(View):
     async def no(self, inter, btn):
         m = inter.guild.get_member(int(self.uid))
         if m:
-            role_prog = inter.guild.get_role(IN_PROGRESS_ROLE_ID)
-            if role_prog in m.roles: await m.remove_roles(role_prog)
+            r_prog = inter.guild.get_role(IN_PROGRESS_ROLE_ID)
+            if r_prog in m.roles: await m.remove_roles(r_prog)
         await inter.response.send_message("❌ Отказано", ephemeral=True)
 
 class PersistentView(View):
     def __init__(self):
         super().__init__(timeout=None)
-    @discord.ui.button(label="Заполнить анкету 📝", style=discord.ButtonStyle.gray, custom_id="reg_start_final")
+    @discord.ui.button(label="Заполнить анкету 📝", style=discord.ButtonStyle.gray, custom_id="reg_start_final_v6")
     async def start(self, inter, btn):
-        role_prog = inter.guild.get_role(IN_PROGRESS_ROLE_ID)
-        if role_prog and role_prog not in inter.user.roles:
-            await inter.user.add_roles(role_prog)
+        r_prog = inter.guild.get_role(IN_PROGRESS_ROLE_ID)
+        if r_prog and r_prog not in inter.user.roles:
+            await inter.user.add_roles(r_prog)
         link = f"{URL_SAYTA}?uid={inter.user.id}"
         v = View().add_item(Button(label="Открыть анкету", url=link))
         await inter.response.send_message("Ваша ссылка:", view=v, ephemeral=True)
 
 class MyBot(commands.Bot):
     def __init__(self):
-        super().__init__(command_prefix="!", intents=discord.Intents.all())
+        intents = discord.Intents.all()
+        super().__init__(command_prefix="!", intents=intents)
     async def setup_hook(self):
         self.add_view(PersistentView())
 
@@ -78,7 +78,9 @@ bot = MyBot()
 @bot.event
 async def on_member_join(member):
     role = member.guild.get_role(IN_PROGRESS_ROLE_ID)
-    if role: await member.add_roles(role)
+    if role: 
+        try: await member.add_roles(role)
+        except: pass
 
 @bot.command()
 async def установка(ctx):
@@ -97,6 +99,4 @@ async def on_message(msg):
 
 if TOKEN:
     bot.run(TOKEN)
-else:
-    print("TOKEN NOT FOUND")
     
