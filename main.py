@@ -13,7 +13,7 @@ IN_PROGRESS_ROLE_ID = 1259813357763170394
 
 # --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
 async def handle(request):
-    return web.Response(text="Бот активен!")
+    return web.Response(text="Бот в сети!")
 
 async def start_web_server():
     app = web.Application()
@@ -23,7 +23,6 @@ async def start_web_server():
     port = int(os.getenv("PORT", 10000))
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
-    print(f"Веб-сервер запущен на порту {port}")
 
 # --- ЛОГИКА КНОПОК ---
 class AdminAction(View):
@@ -42,20 +41,25 @@ class AdminAction(View):
 class PersistentView(View):
     def __init__(self):
         super().__init__(timeout=None)
-    @discord.ui.button(label="Заполнить анкету 📝", style=discord.ButtonStyle.gray, custom_id="reg_button_fixed")
+    
+    # ВАЖНО: custom_id позволяет кнопке работать всегда
+    @discord.ui.button(label="Заполнить анкету 📝", style=discord.ButtonStyle.gray, custom_id="unique_reg_button_v100")
     async def start(self, inter, btn):
-        r_prog = inter.guild.get_role(IN_PROGRESS_ROLE_ID)
-        if r_prog and r_prog not in inter.user.roles:
-            await inter.user.add_roles(r_prog)
+        role_prog = inter.guild.get_role(IN_PROGRESS_ROLE_ID)
+        if role_prog and role_prog not in inter.user.roles:
+            try: await inter.user.add_roles(role_prog)
+            except: pass
         link = f"{URL_SAYTA}?uid={inter.user.id}"
         v = View().add_item(Button(label="Открыть анкету", url=link))
-        await inter.response.send_message("Ваша ссылка:", view=v, ephemeral=True)
+        await inter.response.send_message("Твоя ссылка:", view=v, ephemeral=True)
 
 class MyBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.all()
         super().__init__(command_prefix="!", intents=intents)
+    
     async def setup_hook(self):
+        # Регистрируем вьюху, чтобы она работала после перезагрузки
         self.add_view(PersistentView())
 
 bot = MyBot()
@@ -63,11 +67,13 @@ bot = MyBot()
 @bot.event
 async def on_member_join(member):
     role = member.guild.get_role(IN_PROGRESS_ROLE_ID)
-    if role: await member.add_roles(role)
+    if role: 
+        try: await member.add_roles(role)
+        except: pass
 
 @bot.command()
 async def установка(ctx):
-    await ctx.send("**Регистрация**\nНажмите кнопку ниже:", view=PersistentView())
+    await ctx.send("**Регистрация**\nНажми кнопку ниже:", view=PersistentView())
 
 @bot.event
 async def on_message(msg):
@@ -81,14 +87,10 @@ async def on_message(msg):
     await bot.process_commands(msg)
 
 async def main():
-    # Запускаем и сервер, и бота вместе
     await start_web_server()
     async with bot:
         await bot.start(TOKEN)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
-        
+    asyncio.run(main())
+    
