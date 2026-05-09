@@ -9,15 +9,16 @@ from aiohttp import web
 # ================= НАСТРОЙКИ =================
 TOKEN = os.getenv('BOT_TOKEN')
 MY_ID = 1118970574887211038
-ROLE_ID = 1259813357763170394  # Роль, которую выдаем
-LOG_CHANNEL_ID = 1216754939616039014  # Канал, куда приходят анкеты
+ROLE_ID = 1259813357763170394  # Роль игрока (выдаем)
+CANDIDATE_ROLE_ID = 1259813357763170394 # Роль кандидата (забираем)
+LOG_CHANNEL_ID = 1216754939616039014
 URL_SAYTA = "https://denis123-botg.github.io/sirion_forms/"
 
 deny_counter = 0
 
-# ================= ВЕБ-СЕРВЕР (ДЛЯ RENDER) =================
+# ================= ВЕБ-СЕРВЕР =================
 async def handle(request): 
-    return web.Response(text="Бот активен и готов к работе!")
+    return web.Response(text="Бот активен!")
 
 async def start_server():
     app = web.Application()
@@ -29,7 +30,11 @@ async def start_server():
 
 # ================= КНОПКИ В ЧАТЕ ОТКАЗА =================
 class ChatControlView(View):
-        @discord.ui.button(label="Выдать роль ✅", style=discord.ButtonStyle.green)
+    def __init__(self, target_user_id):
+        super().__init__(timeout=None)
+        self.target_user_id = target_user_id
+
+    @discord.ui.button(label="Выдать роль ✅", style=discord.ButtonStyle.green)
     async def give_role(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != MY_ID: return
         guild = interaction.guild
@@ -37,7 +42,7 @@ class ChatControlView(View):
         
         if member:
             role_to_give = guild.get_role(ROLE_ID)
-            role_to_remove = guild.get_role(1259813357763170394) # ID роли кандидата
+            role_to_remove = guild.get_role(CANDIDATE_ROLE_ID)
 
             await member.add_roles(role_to_give)
             if role_to_remove:
@@ -47,29 +52,53 @@ class ChatControlView(View):
             await asyncio.sleep(5)
             await interaction.channel.delete()
 
+    @discord.ui.button(label="Удалить чат 🗑️", style=discord.ButtonStyle.danger)
+    async def delete_chat(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != MY_ID: return
+        await interaction.channel.delete()
+
 # ================= КНОПКИ ПРОВЕРКИ АНКЕТЫ =================
 class AdminReviewView(View):
+    def __init__(self, target_user_id):
+        super().__init__(timeout=None)
+        self.target_user_id = target_user_id
+
     @discord.ui.button(label="Принять ✅", style=discord.ButtonStyle.green)
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != MY_ID: return
         member = interaction.guild.get_member(self.target_user_id)
         
         if member:
-            role_to_give = interaction.guild.get_role(ROLE_ID) # Роль игрока
-            # Если роль кандидата — это ТА ЖЕ роль, что мы выдаем, то ничего удалять не надо.
-            # НО, если у кандидата есть другая роль (например, "Кандидат"), укажи её ID ниже:
-            role_to_remove_id = 1259813357763170394 # ЗАМЕНИ НА ID РОЛИ КАНДИДАТА
-            role_to_remove = interaction.guild.get_role(role_to_remove_id)
+            role_to_give = interaction.guild.get_role(ROLE_ID)
+            role_to_remove = interaction.guild.get_role(CANDIDATE_ROLE_ID)
 
-            await member.add_roles(role_to_give) # Выдаем новую
-            
+            await member.add_roles(role_to_give)
             if role_to_remove:
-                await member.remove_roles(role_to_remove) # Забираем старую
+                await member.remove_roles(role_to_remove)
             
-            await interaction.response.edit_message(content=f"✅ **ПРИНЯТ**: <@{self.target_user_id}>. Роли обновлены.", view=None)
+            await interaction.response.edit_message(content=f"✅ **ПРИНЯТ**: <@{self.target_user_id}>. Кандидат снят.", view=None)
         else:
             await interaction.response.send_message("Ошибка: Игрок покинул сервер.", ephemeral=True)
 
+    @discord.ui.button(label="Отказать (Чат) ❌", style=discord.ButtonStyle.danger)
+    async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != MY_ID: return
+        global deny_counter
+        deny_counter += 1
+        member = interaction.guild.get_member(self.target_user_id)
+        
+        if not member: return await interaction.response.send_message("Пользователь не найден.", ephemeral=True)
+        
+        ch_name = f"обсуждение-отказа-{deny_counter:04d}"
+        overwrites = {
+            interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+            interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        }
+        
+        channel = await interaction.guild.create_text_channel(name=ch_name, overwrites=overwrites)
+        await channel.send(f"👋 <@{self.target_user_id}>, обсуждение отказа {deny_counter:04d}", view=ChatControlView(self.target_user_id))
+        await interaction.response.edit_message(content=f"❌ **ОТКАЗАНО**. Чат: {channel.mention}", view=None)
 
 # ================= КНОПКА УСТАНОВКИ =================
 class RegistrationView(View):
@@ -78,18 +107,10 @@ class RegistrationView(View):
     
     @discord.ui.button(label="Заполнить анкету 📝", style=discord.ButtonStyle.gray, custom_id="persistent_reg_button")
     async def start_reg(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Генерируем личную ссылку с UID
         personal_url = f"{URL_SAYTA}?uid={interaction.user.id}"
-        
-        # Кнопка-ссылка, которая появится только для нажавшего
         link_view = View()
         link_view.add_item(discord.ui.Button(label="Открыть форму", url=personal_url))
-        
-        await interaction.response.send_message(
-            "Твоя персональная ссылка (действует только для тебя):", 
-            view=link_view, 
-            ephemeral=True
-        )
+        await interaction.response.send_message("Твоя ссылка:", view=link_view, ephemeral=True)
 
 # ================= ОСНОВНОЙ КЛАСС БОТА =================
 class MyBot(commands.Bot):
@@ -98,40 +119,26 @@ class MyBot(commands.Bot):
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
-        # Регистрируем View, чтобы кнопки работали вечно
         self.add_view(RegistrationView())
 
-    async def on_ready(self):
-        print(f"✅ Бот {self.user} запущен и готов!")
-
     async def on_message(self, message):
-        # Слушаем только канал логов и только сообщения от вебхуков
         if message.channel.id == LOG_CHANNEL_ID and message.webhook_id:
             try:
-                # Ищем ID пользователя в тексте сообщения
                 match = re.search(r"ID:(\d+)", message.content)
                 if match:
                     user_id = int(match.group(1))
-                    content = message.content
-                    
-                    # 1. Удаляем сообщение вебхука (нужно право 'Manage Messages')
                     await message.delete()
-                    
-                    # 2. Переотправляем его от имени бота с кнопками
-                    view = AdminReviewView(user_id)
-                    await message.channel.send(content=content, view=view)
+                    await message.channel.send(content=message.content, view=AdminReviewView(user_id))
             except Exception as e:
-                print(f"Ошибка при обработке анкеты: {e}")
-        
+                print(f"Ошибка: {e}")
         await self.process_commands(message)
 
-# ================= ЗАПУСК =================
 bot = MyBot()
 
 @bot.command()
 async def установка(ctx):
     if ctx.author.id == MY_ID:
-        await ctx.send("**Нажмите на кнопку ниже, чтобы начать регистрацию:**", view=RegistrationView())
+        await ctx.send("**Нажмите для регистрации:**", view=RegistrationView())
 
 async def main():
     await start_server()
