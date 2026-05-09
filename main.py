@@ -52,46 +52,27 @@ class ChatControlView(View):
 
 # ================= КНОПКИ ПРОВЕРКИ АНКЕТЫ =================
 class AdminReviewView(View):
-    def __init__(self, target_user_id):
-        super().__init__(timeout=None)
-        self.target_user_id = target_user_id
-
     @discord.ui.button(label="Принять ✅", style=discord.ButtonStyle.green)
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != MY_ID: return
         member = interaction.guild.get_member(self.target_user_id)
+        
         if member:
-            role = interaction.guild.get_role(ROLE_ID)
-            await member.add_roles(role)
-            await interaction.response.edit_message(content=f"✅ **ОДОБРЕНО ДЛЯ** <@{self.target_user_id}>", view=None)
+            role_to_give = interaction.guild.get_role(ROLE_ID) # Роль игрока
+            # Если роль кандидата — это ТА ЖЕ роль, что мы выдаем, то ничего удалять не надо.
+            # НО, если у кандидата есть другая роль (например, "Кандидат"), укажи её ID ниже:
+            role_to_remove_id = 1259813357763170394 # ЗАМЕНИ НА ID РОЛИ КАНДИДАТА
+            role_to_remove = interaction.guild.get_role(role_to_remove_id)
+
+            await member.add_roles(role_to_give) # Выдаем новую
+            
+            if role_to_remove:
+                await member.remove_roles(role_to_remove) # Забираем старую
+            
+            await interaction.response.edit_message(content=f"✅ **ПРИНЯТ**: <@{self.target_user_id}>. Роли обновлены.", view=None)
         else:
             await interaction.response.send_message("Ошибка: Игрок покинул сервер.", ephemeral=True)
 
-    @discord.ui.button(label="Отказать (Чат) ❌", style=discord.ButtonStyle.danger)
-    async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != MY_ID: return
-        global deny_counter
-        deny_counter += 1
-        member = interaction.guild.get_member(self.target_user_id)
-        
-        if not member: 
-            return await interaction.response.send_message("Пользователь не найден.", ephemeral=True)
-        
-        # Название чата по твоему формату
-        ch_name = f"обсуждение-отказа-{deny_counter:04d}"
-        overwrites = {
-            interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-            interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True)
-        }
-        
-        try:
-            channel = await interaction.guild.create_text_channel(name=ch_name, overwrites=overwrites)
-            view = ChatControlView(self.target_user_id)
-            await channel.send(f"👋 <@{self.target_user_id}>, администратор создал этот чат для обсуждения твоей анкеты (Отказ №{deny_counter:04d}).", view=view)
-            await interaction.response.edit_message(content=f"❌ **ОТКАЗАНО**. Чат создан: {channel.mention}", view=None)
-        except Exception as e:
-            await interaction.response.send_message(f"Ошибка прав: Бот не может создать канал. ({e})", ephemeral=True)
 
 # ================= КНОПКА УСТАНОВКИ =================
 class RegistrationView(View):
