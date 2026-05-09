@@ -11,9 +11,8 @@ ADMIN_CHANNEL_ID = 1216754939616039014
 ROLE_ID = 1259828977942528111
 IN_PROGRESS_ROLE_ID = 1259813357763170394
 
-# --- ВЕБ-СЕРВЕР ДЛЯ RENDER ---
 async def handle(request):
-    return web.Response(text="Бот в сети!")
+    return web.Response(text="Бот активен!")
 
 async def start_web_server():
     app = web.Application()
@@ -24,7 +23,6 @@ async def start_web_server():
     site = web.TCPSite(runner, '0.0.0.0', port)
     await site.start()
 
-# --- ЛОГИКА КНОПОК ---
 class AdminAction(View):
     def __init__(self, uid):
         super().__init__(timeout=None)
@@ -42,8 +40,7 @@ class PersistentView(View):
     def __init__(self):
         super().__init__(timeout=None)
     
-    # ВАЖНО: custom_id позволяет кнопке работать всегда
-    @discord.ui.button(label="Заполнить анкету 📝", style=discord.ButtonStyle.gray, custom_id="unique_reg_button_v100")
+    @discord.ui.button(label="Заполнить анкету 📝", style=discord.ButtonStyle.gray, custom_id="reg_final_v999")
     async def start(self, inter, btn):
         role_prog = inter.guild.get_role(IN_PROGRESS_ROLE_ID)
         if role_prog and role_prog not in inter.user.roles:
@@ -57,9 +54,7 @@ class MyBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.all()
         super().__init__(command_prefix="!", intents=intents)
-    
     async def setup_hook(self):
-        # Регистрируем вьюху, чтобы она работала после перезагрузки
         self.add_view(PersistentView())
 
 bot = MyBot()
