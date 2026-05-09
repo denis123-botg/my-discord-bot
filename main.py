@@ -29,26 +29,23 @@ async def start_server():
 
 # ================= КНОПКИ В ЧАТЕ ОТКАЗА =================
 class ChatControlView(View):
-    def __init__(self, target_user_id):
-        super().__init__(timeout=None)
-        self.target_user_id = target_user_id
-
-    @discord.ui.button(label="Выдать роль ✅", style=discord.ButtonStyle.green)
+        @discord.ui.button(label="Выдать роль ✅", style=discord.ButtonStyle.green)
     async def give_role(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != MY_ID: return
         guild = interaction.guild
         member = guild.get_member(self.target_user_id)
+        
         if member:
-            role = guild.get_role(ROLE_ID)
-            await member.add_roles(role)
-            await interaction.response.send_message("✅ Роль выдана! Этот чат удалится через 5 секунд...")
+            role_to_give = guild.get_role(ROLE_ID)
+            role_to_remove = guild.get_role(1259813357763170394) # ID роли кандидата
+
+            await member.add_roles(role_to_give)
+            if role_to_remove:
+                await member.remove_roles(role_to_remove)
+                
+            await interaction.response.send_message("✅ Роль выдана, статус кандидата снят! Удаление чата...")
             await asyncio.sleep(5)
             await interaction.channel.delete()
-
-    @discord.ui.button(label="Удалить чат 🗑️", style=discord.ButtonStyle.danger)
-    async def delete_chat(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != MY_ID: return
-        await interaction.channel.delete()
 
 # ================= КНОПКИ ПРОВЕРКИ АНКЕТЫ =================
 class AdminReviewView(View):
