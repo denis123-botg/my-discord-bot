@@ -10,10 +10,10 @@ from aiohttp import web
 TOKEN = os.getenv('BOT_TOKEN')
 MY_ID = 1118970574887211038
 
-# Роли
-ROLE_CANDIDATE = 1259813357763170394     # КАНДИДАТ
+# Роли (Твои новые ID)
+ROLE_CANDIDATE = 1259813357763170394     # КАНДИДАТ (при входе)
 ROLE_CONFIRMED = 1503397505692598392      # ПОДТВЕРЖДЕН (пропуск к выбору)
-ROLE_REGISTERED = 1259813357763170394     # ЗАРЕГИСТРИРОВАН (финальная)
+ROLE_REGISTERED = 1259828977942528111     # ЗАРЕГИСТРИРОВАН (финальная)
 
 # Отряды
 ROLE_ALFA = 1495510801811898378           # Альфа
@@ -36,7 +36,7 @@ async def start_server():
     await runner.setup()
     await web.TCPSite(runner, '0.0.0.0', int(os.getenv("PORT", 10000))).start()
 
-# ================= ВЫБОР ОТРЯДА =================
+# ================= 2 ЭТАП: ВЫБОР ОТРЯДА =================
 class SquadSelectionView(View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -48,27 +48,29 @@ class SquadSelectionView(View):
         r_squad = guild.get_role(squad_id)
         r_reg = guild.get_role(ROLE_REGISTERED)
         r_conf = guild.get_role(ROLE_CONFIRMED)
+        r_cand = guild.get_role(ROLE_CANDIDATE)
 
-        # 1. Сначала выдаем роль отряда и финальную роль
-        if r_squad: await member.add_roles(r_squad)
-        if r_reg: await member.add_roles(r_reg)
+        # 1. Выдаем ФИНАЛЬНЫЕ роли
+        to_add = []
+        if r_squad: to_add.append(r_squad)
+        if r_reg: to_add.append(r_reg)
+        if to_add: await member.add_roles(*to_add)
         
-        # 2. Небольшая задержка, чтобы Discord успел обновить статус
-        await asyncio.sleep(1)
-        
-        # 3. Снимаем роль "Подтвержден"
-        if r_conf and r_conf in member.roles:
-            await member.remove_roles(r_conf)
+        # 2. Удаляем ВСЕ ВРЕМЕННЫЕ роли
+        to_remove = []
+        if r_conf: to_remove.append(r_conf)
+        if r_cand: to_remove.append(r_cand)
+        if to_remove: await member.remove_roles(*to_remove)
 
-        await interaction.response.send_message(f"✅ Вы вступили в **{name}**! Регистрация завершена.", ephemeral=True)
+        await interaction.response.send_message(f"✅ Вы вступили в **{name}**! Статусы кандидата и подтвержденного сняты.", ephemeral=True)
 
-    @discord.ui.button(label="Отряд Альфа 🐺", style=discord.ButtonStyle.primary, custom_id="sq_alfa_v3")
+    @discord.ui.button(label="Отряд Альфа 🐺", style=discord.ButtonStyle.primary, custom_id="sq_alfa_final")
     async def join_alfa(self, itn, btn): await self.complete(itn, ROLE_ALFA, "Альфа")
 
-    @discord.ui.button(label="Морские котики ⚓", style=discord.ButtonStyle.success, custom_id="sq_seals_v3")
+    @discord.ui.button(label="Морские котики ⚓", style=discord.ButtonStyle.success, custom_id="sq_seals_final")
     async def join_seals(self, itn, btn): await self.complete(itn, ROLE_SEALS, "Морские котики")
 
-# ================= ПРОВЕРКА АНКЕТЫ И ОТКАЗ =================
+# ================= 1 ЭТАП: ПРОВЕРКА АНКЕТЫ =================
 class AdminReviewView(View):
     def __init__(self, target_user_id):
         super().__init__(timeout=None)
@@ -81,15 +83,10 @@ class AdminReviewView(View):
         
         if member:
             r_conf = interaction.guild.get_role(ROLE_CONFIRMED)
-            r_cand = interaction.guild.get_role(ROLE_CANDIDATE)
-
+            # На этом этапе мы НЕ СНИМАЕМ кандидата (чтобы он не потерял доступ к серверу), 
+            # а просто даем "Подтвержден", чтобы открылся канал отрядов.
             if r_conf: await member.add_roles(r_conf)
-            # Снимаем кандидата только если ID ролей РАЗНЫЕ. 
-            # Если ROLE_CANDIDATE == ROLE_REGISTERED, лучше снять его на финальном этапе.
-            if r_cand and ROLE_CANDIDATE != ROLE_CONFIRMED:
-                await member.remove_roles(r_cand)
-
-            await interaction.response.edit_message(content=f"✅ <@{self.target_user_id}> одобрен. Выдана роль Подтвержден.", view=None)
+            await interaction.response.edit_message(content=f"✅ <@{self.target_user_id}> допущен к выбору отряда.", view=None)
         else:
             await interaction.response.send_message("Игрок не найден.", ephemeral=True)
 
@@ -100,20 +97,19 @@ class AdminReviewView(View):
         deny_counter += 1
         guild = interaction.guild
         member = guild.get_member(self.target_user_id)
+        if not member: return
 
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            guild.get_member(MY_ID): discord.PermissionOverwrite(read_messages=True),
-            member: discord.PermissionOverwrite(read_messages=True)
+            member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+            guild.get_member(MY_ID): discord.PermissionOverwrite(read_messages=True, send_messages=True)
         }
-
         category = guild.get_channel(CATEGORY_DENY)
         channel = await guild.create_text_channel(f"отказ-{deny_counter}", category=category, overwrites=overwrites)
-        
-        await channel.send(f" <@{self.target_user_id}>, ваша анкета отклонена. Здесь вы можете узнать причину у <@{MY_ID}>.")
+        await channel.send(f"⚠️ <@{self.target_user_id}>, ваша анкета отклонена. Ожидайте ответа от <@{MY_ID}>.")
         await interaction.response.edit_message(content=f"❌ Отказано. Чат создан: {channel.mention}", view=None)
 
-# ================= ГЛАВНЫЙ БОТ =================
+# ================= ОСНОВНОЙ БОТ =================
 class MyBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=discord.Intents.all())
@@ -140,7 +136,7 @@ class MyBot(commands.Bot):
 class RegistrationView(View):
     def __init__(self):
         super().__init__(timeout=None)
-    @discord.ui.button(label="Заполнить анкету 📝", style=discord.ButtonStyle.gray, custom_id="reg_start_v3")
+    @discord.ui.button(label="Заполнить анкету 📝", style=discord.ButtonStyle.gray, custom_id="reg_start_v4")
     async def start(self, itn, btn):
         url = f"{URL_SAYTA}?uid={itn.user.id}"
         v = View(); v.add_item(discord.ui.Button(label="Открыть анкету", url=url))
