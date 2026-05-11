@@ -10,10 +10,10 @@ from aiohttp import web
 TOKEN = os.getenv('BOT_TOKEN')
 MY_ID = 1118970574887211038
 
-# Роли (Твои новые ID)
-ROLE_CANDIDATE = 1259813357763170394     # КАНДИДАТ (при входе)
-ROLE_CONFIRMED = 1503397505692598392      # ПОДТВЕРЖДЕН (пропуск к выбору)
-ROLE_REGISTERED = 1259828977942528111     # ЗАРЕГИСТРИРОВАН (финальная)
+# Роли
+ROLE_CANDIDATE = 1259813357763170394     # КАНДИДАТ (убираем при принятии)
+ROLE_CONFIRMED = 1503397505692598392      # ПОДТВЕРЖДЕН (даем при принятии, убираем при выборе отряда)
+ROLE_REGISTERED = 1259828977942528111     # ЗАРЕГИСТРИРОВАН (даем в конце)
 
 # Отряды
 ROLE_ALFA = 1495510801811898378           # Альфа
@@ -22,7 +22,7 @@ ROLE_SEALS = 1503396665665523953          # Морские котики
 # Каналы и категории
 LOG_CHANNEL_ID = 1216754939616039014      
 SQUAD_CHANNEL_ID = 1503398461679210687    
-CATEGORY_DENY = 1216754938684903424       # Категория для чатов отказа
+CATEGORY_DENY = 1216754938684903424       
 URL_SAYTA = "https://denis123-botg.github.io/sirion_forms/"
 
 deny_counter = 0
@@ -48,26 +48,18 @@ class SquadSelectionView(View):
         r_squad = guild.get_role(squad_id)
         r_reg = guild.get_role(ROLE_REGISTERED)
         r_conf = guild.get_role(ROLE_CONFIRMED)
-        r_cand = guild.get_role(ROLE_CANDIDATE)
 
-        # 1. Выдаем ФИНАЛЬНЫЕ роли
-        to_add = []
-        if r_squad: to_add.append(r_squad)
-        if r_reg: to_add.append(r_reg)
-        if to_add: await member.add_roles(*to_add)
-        
-        # 2. Удаляем ВСЕ ВРЕМЕННЫЕ роли
-        to_remove = []
-        if r_conf: to_remove.append(r_conf)
-        if r_cand: to_remove.append(r_cand)
-        if to_remove: await member.remove_roles(*to_remove)
+        # АЛГОРИТМ: забирается подтвержден, дается зарегистрирован + отряд
+        if r_reg: await member.add_roles(r_reg)
+        if r_squad: await member.add_roles(r_squad)
+        if r_conf: await member.remove_roles(r_conf)
 
-        await interaction.response.send_message(f"✅ Вы вступили в **{name}**! Статусы кандидата и подтвержденного сняты.", ephemeral=True)
+        await interaction.response.send_message(f"✅ Вы выбрали **{name}**. Регистрация завершена!", ephemeral=True)
 
-    @discord.ui.button(label="Отряд Альфа 🐺", style=discord.ButtonStyle.primary, custom_id="sq_alfa_final")
+    @discord.ui.button(label="Отряд Альфа 🐺", style=discord.ButtonStyle.primary, custom_id="sq_alfa_final_v5")
     async def join_alfa(self, itn, btn): await self.complete(itn, ROLE_ALFA, "Альфа")
 
-    @discord.ui.button(label="Морские котики ⚓", style=discord.ButtonStyle.success, custom_id="sq_seals_final")
+    @discord.ui.button(label="Морские котики ⚓", style=discord.ButtonStyle.success, custom_id="sq_seals_final_v5")
     async def join_seals(self, itn, btn): await self.complete(itn, ROLE_SEALS, "Морские котики")
 
 # ================= 1 ЭТАП: ПРОВЕРКА АНКЕТЫ =================
@@ -83,10 +75,13 @@ class AdminReviewView(View):
         
         if member:
             r_conf = interaction.guild.get_role(ROLE_CONFIRMED)
-            # На этом этапе мы НЕ СНИМАЕМ кандидата (чтобы он не потерял доступ к серверу), 
-            # а просто даем "Подтвержден", чтобы открылся канал отрядов.
+            r_cand = interaction.guild.get_role(ROLE_CANDIDATE)
+
+            # АЛГОРИТМ: забирается роль кандидат, дается подтвержден
             if r_conf: await member.add_roles(r_conf)
-            await interaction.response.edit_message(content=f"✅ <@{self.target_user_id}> допущен к выбору отряда.", view=None)
+            if r_cand: await member.remove_roles(r_cand)
+
+            await interaction.response.edit_message(content=f"✅ <@{self.target_user_id}>: Роль Кандидат снята, выдана роль Подтвержден.", view=None)
         else:
             await interaction.response.send_message("Игрок не найден.", ephemeral=True)
 
@@ -106,8 +101,8 @@ class AdminReviewView(View):
         }
         category = guild.get_channel(CATEGORY_DENY)
         channel = await guild.create_text_channel(f"отказ-{deny_counter}", category=category, overwrites=overwrites)
-        await channel.send(f"⚠️ <@{self.target_user_id}>, ваша анкета отклонена. Ожидайте ответа от <@{MY_ID}>.")
-        await interaction.response.edit_message(content=f"❌ Отказано. Чат создан: {channel.mention}", view=None)
+        await channel.send(f"⚠️ <@{self.target_user_id}>, анкета отклонена. Ждите ответа от администратора.")
+        await interaction.response.edit_message(content=f"❌ Отказано. Чат: {channel.mention}", view=None)
 
 # ================= ОСНОВНОЙ БОТ =================
 class MyBot(commands.Bot):
@@ -136,7 +131,7 @@ class MyBot(commands.Bot):
 class RegistrationView(View):
     def __init__(self):
         super().__init__(timeout=None)
-    @discord.ui.button(label="Заполнить анкету 📝", style=discord.ButtonStyle.gray, custom_id="reg_start_v4")
+    @discord.ui.button(label="Заполнить анкету 📝", style=discord.ButtonStyle.gray, custom_id="reg_start_v5")
     async def start(self, itn, btn):
         url = f"{URL_SAYTA}?uid={itn.user.id}"
         v = View(); v.add_item(discord.ui.Button(label="Открыть анкету", url=url))
@@ -147,12 +142,12 @@ bot = MyBot()
 @bot.command()
 async def установка(ctx):
     if ctx.author.id == MY_ID:
-        await ctx.send("**Регистрация в академию:**", view=RegistrationView())
+        await ctx.send("**Регистрация:**", view=RegistrationView())
 
 @bot.command()
 async def установка_отрядов(ctx):
     if ctx.author.id == MY_ID:
-        await ctx.send("**Выберите ваш будущий отряд:**", view=SquadSelectionView())
+        await ctx.send("**Выберите отряд:**", view=SquadSelectionView())
 
 async def main():
     await start_server()
