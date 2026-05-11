@@ -11,12 +11,12 @@ TOKEN = os.getenv('BOT_TOKEN')
 MY_ID = 1118970574887211038
 
 # Роли
-ROLE_CANDIDATE = 1259813357763170394     # Роль КАНДИДАТ
-ROLE_CONFIRMED = 1503397505692598392      # Роль ПОДТВЕРЖДЕН
-ROLE_REGISTERED = 1259813357763170394     # Роль ЗАРЕГИСТРИРОВАН (финальная)
+ROLE_CANDIDATE = 1259813357763170394     # КАНДИДАТ
+ROLE_CONFIRMED = 1503397505692598392      # ПОДТВЕРЖДЕН
+ROLE_REGISTERED = 1259813357763170394     # ЗАРЕГИСТРИРОВАН (финальная)
 
 # Отряды
-ROLE_ALFA = 1495510801811898378           # Отряд Альфа
+ROLE_ALFA = 1495510801811898378           # Альфа
 ROLE_SEALS = 1503396665665523953          # Морские котики
 
 # Каналы
@@ -42,21 +42,31 @@ class SquadSelectionView(View):
         member = interaction.user
         guild = interaction.guild
         
-        role_squad = guild.get_role(squad_id)
-        role_reg = guild.get_role(ROLE_REGISTERED)
-        role_conf = guild.get_role(ROLE_CONFIRMED)
+        # Получаем объекты ролей
+        r_squad = guild.get_role(squad_id)
+        r_reg = guild.get_role(ROLE_REGISTERED)
+        r_conf = guild.get_role(ROLE_CONFIRMED)
+        r_cand = guild.get_role(ROLE_CANDIDATE)
 
-        # Выдаем отряд и регистрацию, убираем подтвержденного
-        if role_squad: await member.add_roles(role_squad)
-        if role_reg: await member.add_roles(role_reg)
-        if role_conf: await member.remove_roles(role_conf)
+        # 1. Выдаем новые
+        if r_squad: await member.add_roles(r_squad)
+        if r_reg: await member.add_roles(r_reg)
+        
+        # 2. Забираем ВСЕ старые (и Подтвержден, и Кандидат на всякий случай)
+        to_remove = []
+        if r_conf: to_remove.append(r_conf)
+        if r_cand: to_remove.append(r_cand)
+        
+        if to_remove:
+            await member.remove_roles(*to_remove)
 
-        await interaction.response.send_message(f"✅ Вы вступили в **{name}**!", ephemeral=True)
+        await interaction.response.send_message(f"✅ Вы успешно вступили в **{name}**! Статус подтвержденного снят.", ephemeral=True)
 
-    @discord.ui.button(label="Отряд Альфа 🐺", style=discord.ButtonStyle.primary, custom_id="sq_alfa")
+# Кнопки для выбора отряда (custom_id важны для работы после перезагрузки)
+    @discord.ui.button(label="Отряд Альфа 🐺", style=discord.ButtonStyle.primary, custom_id="sq_alfa_v2")
     async def join_alfa(self, itn, btn): await self.complete(itn, ROLE_ALFA, "Альфа")
 
-    @discord.ui.button(label="Морские котики ⚓", style=discord.ButtonStyle.success, custom_id="sq_seals")
+    @discord.ui.button(label="Морские котики ⚓", style=discord.ButtonStyle.success, custom_id="sq_seals_v2")
     async def join_seals(self, itn, btn): await self.complete(itn, ROLE_SEALS, "Морские котики")
 
 # ================= 1 ЭТАП: ПРОВЕРКА АНКЕТЫ =================
@@ -71,21 +81,15 @@ class AdminReviewView(View):
         member = interaction.guild.get_member(self.target_user_id)
         
         if member:
-            role_confirmed = interaction.guild.get_role(ROLE_CONFIRMED)
-            role_candidate = interaction.guild.get_role(ROLE_CANDIDATE)
+            r_conf = interaction.guild.get_role(ROLE_CONFIRMED)
+            r_cand = interaction.guild.get_role(ROLE_CANDIDATE)
 
-            # ВАЖНО: Сначала даем новую, потом забираем старую
-            if role_confirmed: await member.add_roles(role_confirmed)
-            if role_candidate: await member.remove_roles(role_candidate)
+            if r_conf: await member.add_roles(r_conf)
+            if r_cand: await member.remove_roles(r_cand)
 
-            await interaction.response.edit_message(content=f"✅ <@{self.target_user_id}> прошел анкету. Роль Кандидат снята, выдана роль Подтвержден.", view=None)
+            await interaction.response.edit_message(content=f"✅ <@{self.target_user_id}> прошел 1 этап. Роль Кандидат снята.", view=None)
         else:
-            await interaction.response.send_message("Игрок не найден на сервере.", ephemeral=True)
-
-    @discord.ui.button(label="Отказать ❌", style=discord.ButtonStyle.danger)
-    async def deny(self, interaction, button):
-        # Логика отказа (создание чата) остается без изменений
-        await interaction.response.send_message("Функция отказа в разработке или используйте старую версию.", ephemeral=True)
+            await interaction.response.send_message("Игрок не найден.", ephemeral=True)
 
 # ================= ОСНОВНОЙ БОТ =================
 class MyBot(commands.Bot):
@@ -105,16 +109,16 @@ class MyBot(commands.Bot):
             try:
                 match = re.search(r"ID:(\d+)", message.content)
                 if match:
-                    user_id = int(match.group(1))
+                    uid = int(match.group(1))
                     await message.delete()
-                    await message.channel.send(content=message.content, view=AdminReviewView(user_id))
+                    await message.channel.send(content=message.content, view=AdminReviewView(uid))
             except: pass
         await self.process_commands(message)
 
 class RegistrationView(View):
     def __init__(self):
         super().__init__(timeout=None)
-    @discord.ui.button(label="Заполнить анкету 📝", style=discord.ButtonStyle.gray, custom_id="reg_start")
+    @discord.ui.button(label="Заполнить анкету 📝", style=discord.ButtonStyle.gray, custom_id="reg_start_v2")
     async def start(self, itn, btn):
         url = f"{URL_SAYTA}?uid={itn.user.id}"
         v = View(); v.add_item(discord.ui.Button(label="Открыть анкету", url=url))
@@ -125,12 +129,12 @@ bot = MyBot()
 @bot.command()
 async def установка(ctx):
     if ctx.author.id == MY_ID:
-        await ctx.send("**Регистрация:**", view=RegistrationView())
+        await ctx.send("**Начни регистрацию:**", view=RegistrationView())
 
 @bot.command()
 async def установка_отрядов(ctx):
     if ctx.author.id == MY_ID:
-        await ctx.send("**Выбери свой отряд:**", view=SquadSelectionView())
+        await ctx.send("**Выберите отряд:**", view=SquadSelectionView())
 
 async def main():
     await start_server()
