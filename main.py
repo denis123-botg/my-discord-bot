@@ -14,7 +14,7 @@ MY_ID = 1118970574887211038
 ROLE_CANDIDATE = 1259813357763170394     # КАНДИДАТ
 ROLE_CONFIRMED = 1503397505692598392      # ПОДТВЕРЖДЕН
 ROLE_REGISTERED = 1259828977942528111     # ЗАРЕГИСТРИРОВАН
-ROLE_PRIVATE = 1266008795855847444       # РЯДОВОЙ (ID ОБНОВЛЕН)
+ROLE_PRIVATE = 1266008795855847444       # РЯДОВОЙ
 
 # Отряды
 ROLE_ALFA = 1495510801811898378           
@@ -44,10 +44,12 @@ class DenyChatView(View):
 
     @discord.ui.button(label="Удалить чат 🗑️", style=discord.ButtonStyle.danger, custom_id="del_ch_final")
     async def delete_chat(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id == MY_ID:
-            await interaction.response.send_message("Удаление...")
+        if interaction.user.id == MY_ID or interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("Удаление чата через 2 секунды...")
             await asyncio.sleep(2)
             await interaction.channel.delete()
+        else:
+            await interaction.response.send_message("❌ У вас нет прав на удаление этого канала.", ephemeral=True)
 
 # ================= VIEW: ВЫБОР ОТРЯДА =================
 class SquadSelectionView(View):
@@ -59,17 +61,17 @@ class SquadSelectionView(View):
         guild = interaction.guild
         r_conf = guild.get_role(ROLE_CONFIRMED)
         
-        # Роли для выдачи: Зарегистрирован, Рядовой, Отряд
+        if r_conf not in member.roles:
+            await interaction.response.send_message("❌ Вы уже выбрали отряд или не имеете доступа к регистрации.", ephemeral=True)
+            return
+
         roles_to_add = [
             guild.get_role(ROLE_REGISTERED),
             guild.get_role(ROLE_PRIVATE),
             guild.get_role(squad_id)
         ]
         
-        # Добавляем роли (фильтруем None, если роль не найдена)
         await member.add_roles(*[r for r in roles_to_add if r])
-        
-        # Снимаем Подтвержденного
         if r_conf: 
             await member.remove_roles(r_conf)
             
@@ -83,29 +85,53 @@ class SquadSelectionView(View):
 
 # ================= VIEW: ПРОВЕРКА АНКЕТЫ =================
 class AdminReviewView(View):
-    def __init__(self, target_user_id):
+    def __init__(self):
         super().__init__(timeout=None)
-        self.target_user_id = target_user_id
 
-    @discord.ui.button(label="Принять ✅", style=discord.ButtonStyle.green)
+    def get_target_id(self, message_content):
+        match = re.search(r"ID:(\d+)", message_content)
+        return int(match.group(1)) if match else None
+
+    @discord.ui.button(label="Принять ✅", style=discord.ButtonStyle.green, custom_id="admin_approve_btn")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != MY_ID: return
-        member = interaction.guild.get_member(self.target_user_id)
+        if interaction.user.id != MY_ID and not interaction.user.guild_permissions.administrator: 
+            await interaction.response.send_message("❌ Доступно только администрации.", ephemeral=True)
+            return
+            
+        target_id = self.get_target_id(interaction.message.content)
+        if not target_id:
+            await interaction.response.send_message("❌ Не удалось определить ID пользователя из анкеты.", ephemeral=True)
+            return
+
+        member = interaction.guild.get_member(target_id)
         if member:
             r_conf = interaction.guild.get_role(ROLE_CONFIRMED)
             r_cand = interaction.guild.get_role(ROLE_CANDIDATE)
             if r_conf: await member.add_roles(r_conf)
             if r_cand: await member.remove_roles(r_cand)
-            await interaction.response.edit_message(content=f"✅ <@{self.target_user_id}> принят (Кандидат снят).", view=None)
+            # Изменяем сообщение: кнопки исчезают, а внизу текста анкеты приписывается статус
+            await interaction.response.edit_message(content=interaction.message.content + f"\n\n🟢 **СТАТУС: ОДОБРЕНО** администратором <@{interaction.user.id}>.", view=None)
+        else:
+            await interaction.response.send_message("❌ Пользователь не найден на сервере.", ephemeral=True)
 
-    @discord.ui.button(label="Отказать ❌", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Отказать ❌", style=discord.ButtonStyle.danger, custom_id="admin_deny_btn")
     async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != MY_ID: return
+        if interaction.user.id != MY_ID and not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("❌ Доступно только администрации.", ephemeral=True)
+            return
+            
+        target_id = self.get_target_id(interaction.message.content)
+        if not target_id:
+            await interaction.response.send_message("❌ Не удалось определить ID пользователя.", ephemeral=True)
+            return
+
         global deny_counter
         deny_counter += 1
         guild = interaction.guild
-        member = guild.get_member(self.target_user_id)
-        if not member: return
+        member = guild.get_member(target_id)
+        if not member: 
+            await interaction.response.send_message("❌ Пользователь покинул сервер.", ephemeral=True)
+            return
 
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
@@ -114,18 +140,21 @@ class AdminReviewView(View):
         }
         category = guild.get_channel(CATEGORY_DENY)
         ch = await guild.create_text_channel(f"отказ-{deny_counter}", category=category, overwrites=overwrites)
-        await ch.send(f"⚠️ <@{self.target_user_id}>, анкета отклонена. Ожидайте админа.", view=DenyChatView())
-        await interaction.response.edit_message(content=f"❌ Отказано. Чат: {ch.mention}", view=None)
+        await ch.send(f"⚠️ <@{target_id}>, ваша акета отклонена. Ожидайте администратора в этом канале.", view=DenyChatView())
+        # Изменяем сообщение: кнопки исчезают, а внизу текста анкеты приписывается статус и ссылка на чат разбора
+        await interaction.response.edit_message(content=interaction.message.content + f"\n\n🔴 **СТАТУС: ОТКЛОНЕНО** администратором <@{interaction.user.id}>.\n💬 Чат разбора: {ch.mention}", view=None)
 
 # ================= VIEW: АНКЕТА =================
 class RegistrationView(View):
     def __init__(self):
         super().__init__(timeout=None)
+        
     @discord.ui.button(label="Заполнить анкету 📝", style=discord.ButtonStyle.gray, custom_id="reg_v12")
     async def start(self, itn, btn):
         url = f"{URL_SAYTA}?uid={itn.user.id}"
-        v = View(); v.add_item(discord.ui.Button(label="Открыть", url=url))
-        await itn.response.send_message("Твоя персональная ссылка:", view=v, ephemeral=True)
+        v = View()
+        v.add_item(discord.ui.Button(label="Открыть анкету", url=url))
+        await itn.response.send_message("Твоя персональная ссылка на анкету (не делись ей с другими):", view=v, ephemeral=True)
 
 # ================= BOT =================
 class MyBot(commands.Bot):
@@ -136,6 +165,7 @@ class MyBot(commands.Bot):
         self.add_view(SquadSelectionView())
         self.add_view(RegistrationView())
         self.add_view(DenyChatView())
+        self.add_view(AdminReviewView())
         
     async def on_member_join(self, m):
         r = m.guild.get_role(ROLE_CANDIDATE)
@@ -145,20 +175,22 @@ class MyBot(commands.Bot):
         if m.channel.id == LOG_CHANNEL_ID and m.webhook_id:
             match = re.search(r"ID:(\d+)", m.content)
             if match:
-                uid = int(match.group(1))
-                await m.delete()
-                await m.channel.send(content=m.content, view=AdminReviewView(uid))
+                # Изменение здесь: оригинальное сообщение от вебхука сайта больше НЕ удаляется.
+                # Бот просто берет это сообщение и добавляет к нему интерактивные кнопки.
+                await m.edit(view=AdminReviewView())
         await self.process_commands(m)
 
 bot = MyBot()
 
 @bot.command()
 async def установка(ctx):
-    if ctx.author.id == MY_ID: await ctx.send("**Регистрация:**", view=RegistrationView())
+    if ctx.author.id == MY_ID or ctx.author.guild_permissions.administrator: 
+        await ctx.send("**Нажмите кнопку ниже, чтобы начать регистрацию в ПМК «Сирион»:**", view=RegistrationView())
 
 @bot.command()
 async def установка_отрядов(ctx):
-    if ctx.author.id == MY_ID: await ctx.send("**Выбор отряда:**", view=SquadSelectionView())
+    if ctx.author.id == MY_ID or ctx.author.guild_permissions.administrator: 
+        await ctx.send("**Бойцы, прошедшие первичный отбор, выберите свой будущий отряд:**", view=SquadSelectionView())
 
 async def main():
     await start_server()
