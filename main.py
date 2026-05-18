@@ -109,7 +109,7 @@ class AdminReviewView(View):
             r_cand = interaction.guild.get_role(ROLE_CANDIDATE)
             if r_conf: await member.add_roles(r_conf)
             if r_cand: await member.remove_roles(r_cand)
-            # Изменяем сообщение: кнопки исчезают, а внизу текста анкеты приписывается статус
+            # Текст анкеты полностью остаётся, кнопки убираются, снизу пишется статус
             await interaction.response.edit_message(content=interaction.message.content + f"\n\n🟢 **СТАТУС: ОДОБРЕНО** администратором <@{interaction.user.id}>.", view=None)
         else:
             await interaction.response.send_message("❌ Пользователь не найден на сервере.", ephemeral=True)
@@ -140,8 +140,8 @@ class AdminReviewView(View):
         }
         category = guild.get_channel(CATEGORY_DENY)
         ch = await guild.create_text_channel(f"отказ-{deny_counter}", category=category, overwrites=overwrites)
-        await ch.send(f"⚠️ <@{target_id}>, ваша акета отклонена. Ожидайте администратора в этом канале.", view=DenyChatView())
-        # Изменяем сообщение: кнопки исчезают, а внизу текста анкеты приписывается статус и ссылка на чат разбора
+        await ch.send(f"⚠️ <@{target_id}>, ваша анкета отклонена. Ожидайте администратора в этом канале.", view=DenyChatView())
+        # Текст анкеты полностью остаётся, кнопки убираются, снизу пишется статус отказа
         await interaction.response.edit_message(content=interaction.message.content + f"\n\n🔴 **СТАТУС: ОТКЛОНЕНО** администратором <@{interaction.user.id}>.\n💬 Чат разбора: {ch.mention}", view=None)
 
 # ================= VIEW: АНКЕТА =================
@@ -175,9 +175,9 @@ class MyBot(commands.Bot):
         if m.channel.id == LOG_CHANNEL_ID and m.webhook_id:
             match = re.search(r"ID:(\d+)", m.content)
             if match:
-                # Изменение здесь: оригинальное сообщение от вебхука сайта больше НЕ удаляется.
-                # Бот просто берет это сообщение и добавляет к нему интерактивные кнопки.
-                await m.edit(view=AdminReviewView())
+                # Перезаписываем сообщение: удаляем исходное пустое от вебхука и тут же шлём текст + кнопки от бота
+                await m.delete()
+                await m.channel.send(content=m.content, view=AdminReviewView())
         await self.process_commands(m)
 
 bot = MyBot()
