@@ -13,11 +13,12 @@ MY_ID = 1118970574887211038
 # Роли
 ROLE_CANDIDATE = 1259813357763170394     # КАНДИДАТ
 ROLE_PLAYER = 1506372814477988002        # ИГРОК
+ROLE_REGISTERED = 1259828977942528111     # ЗАРЕГИСТРИРОВАН (Добавлено обратно)
 
 # Каналы
 LOG_CHANNEL_ID = 1216754939616039014      
 CATEGORY_DENY = 1216754938684903424       
-URL_SAYTA = "https://sirionhub.online/"   # ИСПРАВЛЕНО: Твой новый домен
+URL_SAYTA = "https://sirionhub.online/"   
 
 deny_counter = 0
 
@@ -67,12 +68,18 @@ class AdminReviewView(View):
         member = interaction.guild.get_member(target_id)
         if member:
             r_play = interaction.guild.get_role(ROLE_PLAYER)
+            r_reg = interaction.guild.get_role(ROLE_REGISTERED) # Получаем роль зарегистрированного
             r_cand = interaction.guild.get_role(ROLE_CANDIDATE)
             
-            if r_play: await member.add_roles(r_play)
-            if r_cand: await member.remove_roles(r_cand)
+            # Собираем роли, которые нужно выдать (проверяя, что они существуют на сервере)
+            roles_to_add = [r for r in [r_play, r_reg] if r]
+            if roles_to_add: 
+                await member.add_roles(*roles_to_add)
+                
+            if r_cand: 
+                await member.remove_roles(r_cand)
             
-            await interaction.response.edit_message(content=interaction.message.content + f"\n\n🟢 **СТАТУС: ОДОБРЕНО** администратором <@{interaction.user.id}>. Пользователю выдана роль <@&{ROLE_PLAYER}>.", view=None)
+            await interaction.response.edit_message(content=interaction.message.content + f"\n\n🟢 **СТАТУС: ОДОБРЕНО** администратором <@{interaction.user.id}>. Пользователю выданы роли <@&{ROLE_PLAYER}> и <@&{ROLE_REGISTERED}>.", view=None)
         else:
             await interaction.response.send_message("❌ Пользователь не найден на сервере.", ephemeral=True)
 
