@@ -2,7 +2,9 @@ import discord
 import os
 import asyncio
 import re
-from discord.ext import commands
+import sqlite3
+from datetime import datetime, timedelta
+from discord.ext import commands, tasks
 from discord.ui import View, Button
 from aiohttp import web
 
@@ -13,14 +15,32 @@ MY_ID = 1118970574887211038
 # Роли
 ROLE_CANDIDATE = 1259813357763170394     # КАНДИДАТ
 ROLE_PLAYER = 1506372814477988002        # ИГРОК
-ROLE_REGISTERED = 1259828977942528111     # ЗАРЕГИСТРИРОВАН (Добавлено обратно)
+ROLE_REGISTERED = 1259828977942528111     # ЗАРЕГИСТРИРОВАН
 
 # Каналы
 LOG_CHANNEL_ID = 1216754939616039014      
 CATEGORY_DENY = 1216754938684903424       
+ACTIVITY_CHECK_CHANNEL_ID = 1506694190057263325 # ЧАТ ПРОВЕРКИ АКТИВНОСТИ
 URL_SAYTA = "https://sirionhub.online/"   
 
 deny_counter = 0
+
+# ================= ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ =================
+conn = sqlite3.connect("activity.db")
+cursor = conn.cursor()
+cursor.execute("""
+    CREATE TABLE IF NOT EXISTS activity (
+        user_id INTEGER PRIMARY KEY,
+        last_active TEXT,
+        warned INTEGER DEFAULT 0
+    )
+""")
+conn.commit()
+
+def update_user_activity(user_id):
+    now = datetime.utcnow().isoformat()
+    cursor.execute("INSERT OR REPLACE INTO activity (user_id, last_active, warned) VALUES (?, ?, 0)", (user_id, now))
+    conn.commit()
 
 # ================= ВЕБ-СЕРВЕР =================
 async def handle(request): return web.Response(text="Work")
@@ -30,6 +50,24 @@ async def start_server():
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, '0.0.0.0', int(os.getenv("PORT", 10000))).start()
+
+# ================= VIEW: КНОПКА ПОДТВЕРЖДЕНИЯ АКТИВНОСТИ =================
+class AliveButtonView(View):
+    def __init__(self, target_id):
+        super().__init__(timeout=None)
+        self.target_id = target_id
+
+    @discord.ui.button(label="Я тут! 🎮", style=discord.ButtonStyle.green, custom_id="alive_btn")
+    async def alive_click(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.target_id:
+            await interaction.response.send_message("❌ Эта кнопка предназначена не для вас!", ephemeral=True)
+            return
+        
+        # Обновляем активность игрока в БД
+        update_user_activity(interaction.user.id)
+        await interaction.response.send_message("✅ Ваша активность подтверждена! Больше вам ничего не угрожает.", ephemeral=True)
+        # Удаляем сообщение с предупреждением, так как оно больше не нужно
+        await interaction.message.delete()
 
 # ================= VIEW: УДАЛЕНИЕ ЧАТА ОТКАЗА =================
 class DenyChatView(View):
@@ -68,16 +106,15 @@ class AdminReviewView(View):
         member = interaction.guild.get_member(target_id)
         if member:
             r_play = interaction.guild.get_role(ROLE_PLAYER)
-            r_reg = interaction.guild.get_role(ROLE_REGISTERED) # Получаем роль зарегистрированного
+            r_reg = interaction.guild.get_role(ROLE_REGISTERED)
             r_cand = interaction.guild.get_role(ROLE_CANDIDATE)
             
-            # Собираем роли, которые нужно выдать (проверяя, что они существуют на сервере)
             roles_to_add = [r for r in [r_play, r_reg] if r]
-            if roles_to_add: 
-                await member.add_roles(*roles_to_add)
-                
-            if r_cand: 
-                await member.remove_roles(r_cand)
+            if roles_to_add: await member.add_roles(*roles_to_add)
+            if r_cand: await member.remove_roles(r_cand)
+            
+            # Вносим нового игрока в базу активности сразу при принятии
+            update_user_activity(target_id)
             
             await interaction.response.edit_message(content=interaction.message.content + f"\n\n🟢 **СТАТУС: ОДОБРЕНО** администратором <@{interaction.user.id}>. Пользователю выданы роли <@&{ROLE_PLAYER}> и <@&{ROLE_REGISTERED}>.", view=None)
         else:
@@ -134,18 +171,70 @@ class MyBot(commands.Bot):
         self.add_view(RegistrationView())
         self.add_view(DenyChatView())
         self.add_view(AdminReviewView())
+        self.check_activity_loop.start() # Запуск фоновой проверки активности
         
     async def on_member_join(self, m):
         r = m.guild.get_role(ROLE_CANDIDATE)
         if r: await m.add_roles(r)
         
     async def on_message(self, m):
-        if m.channel.id == LOG_CHANNEL_ID and m.webhook_id:
-            match = re.search(r"ID:(\d+)", m.content)
-            if match:
-                await m.delete()
-                await m.channel.send(content=m.content, view=AdminReviewView())
+        if m.author.bot:
+            # Если сообщение от вебхука в логах анкет
+            if m.channel.id == LOG_CHANNEL_ID and m.webhook_id:
+                match = re.search(r"ID:(\d+)", m.content)
+                if match:
+                    await m.delete()
+                    await m.channel.send(content=m.content, view=AdminReviewView())
+            return
+
+        # Обновляем активность в БД, если пишет обычный пользователь
+        update_user_activity(m.author.id)
         await self.process_commands(m)
+
+    # Фоновое задание: Проверка активности раз в час
+    @tasks.loop(hours=1)
+    async def check_activity_loop(self):
+        await self.wait_until_ready()
+        # Ищем первый доступный сервер бота
+        if not self.guilds: return
+        guild = self.guilds[0]
+        
+        channel = guild.get_channel(ACTIVITY_CHECK_CHANNEL_ID)
+        if not channel: return
+
+        cursor.execute("SELECT user_id, last_active, warned FROM activity")
+        rows = cursor.fetchall()
+        now = datetime.utcnow()
+
+        for user_id, last_active_str, warned in rows:
+            member = guild.get_member(user_id)
+            # Если пользователя больше нет на сервере, просто убираем его из проверки
+            if not member: continue
+            # Проверяем только тех, у кого уже есть роль Игрока (верифицированных)
+            if guild.get_role(ROLE_PLAYER) not in member.roles: continue
+
+            last_active = datetime.fromisoformat(last_active_str)
+            days_passed = (now - last_active).days
+
+            # День 6: Пишем предупреждение и вешаем кнопку
+            if days_passed >= 6 and days_passed < 7 and warned == 0:
+                cursor.execute("UPDATE activity SET warned = 1 WHERE user_id = ?", (user_id,))
+                conn.commit()
+                await channel.send(
+                    f"⚠️ Игрок <@{user_id}>, вы не проявляли активность на сервере уже 6 дней!\n"
+                    f"Нажмите на кнопку ниже в течение 24 часов, иначе вы будете исключены с сервера.",
+                    view=AliveButtonView(user_id)
+                )
+
+            # День 7: Время вышло, кикаем
+            elif days_passed >= 7:
+                cursor.execute("DELETE FROM activity WHERE user_id = ?", (user_id,))
+                conn.commit()
+                try:
+                    await member.kick(reason="Неактивность на сервере в течение 7 дней")
+                    await channel.send(f"❌ Игрок **{member.name}** был кикнут с сервера за полную неактивность в течение 7 дней.")
+                except discord.Forbidden:
+                    pass
 
 bot = MyBot()
 
