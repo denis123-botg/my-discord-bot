@@ -17,7 +17,7 @@ ROLE_PLAYER = 1506372814477988002        # ИГРОК
 # Каналы
 LOG_CHANNEL_ID = 1216754939616039014      
 CATEGORY_DENY = 1216754938684903424       
-URL_SAYTA = "https://denis123-botg.github.io/sirion_forms/"
+URL_SAYTA = "https://sirionhub.online/"   # ИСПРАВЛЕНО: Твой новый домен
 
 deny_counter = 0
 
