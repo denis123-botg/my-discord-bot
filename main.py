@@ -3,7 +3,7 @@ import os
 import asyncio
 import re
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime
 from discord.ext import commands, tasks
 from discord.ui import View, Button
 from aiohttp import web
@@ -16,11 +16,12 @@ MY_ID = 1118970574887211038
 ROLE_CANDIDATE = 1259813357763170394     # КАНДИДАТ
 ROLE_PLAYER = 1506372814477988002        # ИГРОК
 ROLE_REGISTERED = 1259828977942528111     # ЗАРЕГИСТРИРОВАН
+ROLE_MODERATOR = 1182036238337855600      # МОДЕРАТОР (Новый доступ)
 
 # Каналы
 LOG_CHANNEL_ID = 1216754939616039014      
 CATEGORY_DENY = 1216754938684903424       
-ACTIVITY_CHECK_CHANNEL_ID = 1506694190057263325 # ЧАТ ПРОВЕРКИ АКТИВНОСТИ
+ACTIVITY_CHECK_CHANNEL_ID = 1506694190057263325 
 URL_SAYTA = "https://sirionhub.online/"   
 
 deny_counter = 0
@@ -41,6 +42,29 @@ def update_user_activity(user_id):
     now = datetime.utcnow().isoformat()
     cursor.execute("INSERT OR REPLACE INTO activity (user_id, last_active, warned) VALUES (?, ?, 0)", (user_id, now))
     conn.commit()
+
+# Проверка: имеет ли пользователь права модератора/админа/владельца бота
+def has_staff_perms(interaction: discord.Interaction):
+    if interaction.user.id == MY_ID:
+        return True
+    if interaction.user.guild_permissions.administrator:
+        return True
+    # Проверка наличия роли Модератора
+    mod_role = interaction.guild.get_role(ROLE_MODERATOR)
+    if mod_role and mod_role in interaction.user.roles:
+        return True
+    return False
+
+# Проверка для текстовых команд (!установка)
+def has_cmd_perms(ctx):
+    if ctx.author.id == MY_ID:
+        return True
+    if ctx.author.guild_permissions.administrator:
+        return True
+    mod_role = ctx.guild.get_role(ROLE_MODERATOR)
+    if mod_role and mod_role in ctx.author.roles:
+        return True
+    return False
 
 # ================= ВЕБ-СЕРВЕР =================
 async def handle(request): return web.Response(text="Work")
@@ -63,10 +87,8 @@ class AliveButtonView(View):
             await interaction.response.send_message("❌ Эта кнопка предназначена не для вас!", ephemeral=True)
             return
         
-        # Обновляем активность игрока в БД
         update_user_activity(interaction.user.id)
         await interaction.response.send_message("✅ Ваша активность подтверждена! Больше вам ничего не угрожает.", ephemeral=True)
-        # Удаляем сообщение с предупреждением, так как оно больше не нужно
         await interaction.message.delete()
 
 # ================= VIEW: УДАЛЕНИЕ ЧАТА ОТКАЗА =================
@@ -76,7 +98,7 @@ class DenyChatView(View):
 
     @discord.ui.button(label="Удалить чат 🗑️", style=discord.ButtonStyle.danger, custom_id="del_ch_final")
     async def delete_chat(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id == MY_ID or interaction.user.guild_permissions.administrator:
+        if has_staff_perms(interaction):
             await interaction.response.send_message("Удаление чата через 2 секунды...")
             await asyncio.sleep(2)
             await interaction.channel.delete()
@@ -94,8 +116,8 @@ class AdminReviewView(View):
 
     @discord.ui.button(label="Принять ✅", style=discord.ButtonStyle.green, custom_id="admin_approve_btn")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != MY_ID and not interaction.user.guild_permissions.administrator: 
-            await interaction.response.send_message("❌ Доступно только администрации.", ephemeral=True)
+        if not has_staff_perms(interaction):
+            await interaction.response.send_message("❌ Доступно только администрации и модераторам.", ephemeral=True)
             return
             
         target_id = self.get_target_id(interaction.message.content)
@@ -113,17 +135,16 @@ class AdminReviewView(View):
             if roles_to_add: await member.add_roles(*roles_to_add)
             if r_cand: await member.remove_roles(r_cand)
             
-            # Вносим нового игрока в базу активности сразу при принятии
             update_user_activity(target_id)
             
-            await interaction.response.edit_message(content=interaction.message.content + f"\n\n🟢 **СТАТУС: ОДОБРЕНО** администратором <@{interaction.user.id}>. Пользователю выданы роли <@&{ROLE_PLAYER}> и <@&{ROLE_REGISTERED}>.", view=None)
+            await interaction.response.edit_message(content=interaction.message.content + f"\n\n🟢 **СТАТУС: ОДОБРЕНО** модератором <@{interaction.user.id}>. Пользователю выданы роли <@&{ROLE_PLAYER}> and <@&{ROLE_REGISTERED}>.", view=None)
         else:
             await interaction.response.send_message("❌ Пользователь не найден на сервере.", ephemeral=True)
 
     @discord.ui.button(label="Отказать ❌", style=discord.ButtonStyle.danger, custom_id="admin_deny_btn")
     async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != MY_ID and not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("❌ Доступно только администрации.", ephemeral=True)
+        if not has_staff_perms(interaction):
+            await interaction.response.send_message("❌ Доступно только администрации и модераторам.", ephemeral=True)
             return
             
         target_id = self.get_target_id(interaction.message.content)
@@ -139,16 +160,18 @@ class AdminReviewView(View):
             await interaction.response.send_message("❌ Пользователь покинул сервер.", ephemeral=True)
             return
 
+        # Настраиваем доступы к чату ответа (включая роль Модератора)
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
             member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-            guild.get_member(MY_ID): discord.PermissionOverwrite(read_messages=True, send_messages=True)
+            guild.get_member(MY_ID): discord.PermissionOverwrite(read_messages=True, send_messages=True),
+            guild.get_role(ROLE_MODERATOR): discord.PermissionOverwrite(read_messages=True, send_messages=True)
         }
         category = guild.get_channel(CATEGORY_DENY)
         ch = await guild.create_text_channel(f"отказ-{deny_counter}", category=category, overwrites=overwrites)
-        await ch.send(f"⚠️ <@{target_id}>, ваша анкета отклонена. Ожидайте администратора в этом канале.", view=DenyChatView())
+        await ch.send(f"⚠️ <@{target_id}>, ваша анкета отклонена. Ожидайте модератора в этом канале.", view=DenyChatView())
         
-        await interaction.response.edit_message(content=interaction.message.content + f"\n\n🔴 **СТАТУС: ОТКЛОНЕНО** администратором <@{interaction.user.id}>.\n💬 Чат разбора: {ch.mention}", view=None)
+        await interaction.response.edit_message(content=interaction.message.content + f"\n\n🔴 **СТАТУС: ОТКЛОНЕНО** модератором <@{interaction.user.id}>.\n💬 Чат разбора: {ch.mention}", view=None)
 
 # ================= VIEW: АНКЕТА =================
 class RegistrationView(View):
@@ -171,7 +194,7 @@ class MyBot(commands.Bot):
         self.add_view(RegistrationView())
         self.add_view(DenyChatView())
         self.add_view(AdminReviewView())
-        self.check_activity_loop.start() # Запуск фоновой проверки активности
+        self.check_activity_loop.start()
         
     async def on_member_join(self, m):
         r = m.guild.get_role(ROLE_CANDIDATE)
@@ -179,7 +202,6 @@ class MyBot(commands.Bot):
         
     async def on_message(self, m):
         if m.author.bot:
-            # Если сообщение от вебхука в логах анкет
             if m.channel.id == LOG_CHANNEL_ID and m.webhook_id:
                 match = re.search(r"ID:(\d+)", m.content)
                 if match:
@@ -187,15 +209,12 @@ class MyBot(commands.Bot):
                     await m.channel.send(content=m.content, view=AdminReviewView())
             return
 
-        # Обновляем активность в БД, если пишет обычный пользователь
         update_user_activity(m.author.id)
         await self.process_commands(m)
 
-    # Фоновое задание: Проверка активности раз в час
     @tasks.loop(hours=1)
     async def check_activity_loop(self):
         await self.wait_until_ready()
-        # Ищем первый доступный сервер бота
         if not self.guilds: return
         guild = self.guilds[0]
         
@@ -208,15 +227,12 @@ class MyBot(commands.Bot):
 
         for user_id, last_active_str, warned in rows:
             member = guild.get_member(user_id)
-            # Если пользователя больше нет на сервере, просто убираем его из проверки
             if not member: continue
-            # Проверяем только тех, у кого уже есть роль Игрока (верифицированных)
             if guild.get_role(ROLE_PLAYER) not in member.roles: continue
 
             last_active = datetime.fromisoformat(last_active_str)
             days_passed = (now - last_active).days
 
-            # День 6: Пишем предупреждение и вешаем кнопку
             if days_passed >= 6 and days_passed < 7 and warned == 0:
                 cursor.execute("UPDATE activity SET warned = 1 WHERE user_id = ?", (user_id,))
                 conn.commit()
@@ -226,7 +242,6 @@ class MyBot(commands.Bot):
                     view=AliveButtonView(user_id)
                 )
 
-            # День 7: Время вышло, кикаем
             elif days_passed >= 7:
                 cursor.execute("DELETE FROM activity WHERE user_id = ?", (user_id,))
                 conn.commit()
@@ -240,7 +255,7 @@ bot = MyBot()
 
 @bot.command()
 async def установка(ctx):
-    if ctx.author.id == MY_ID or ctx.author.guild_permissions.administrator: 
+    if has_cmd_perms(ctx):
         await ctx.send("**Добро пожаловать в Сирион Хаб! Нажмите кнопку ниже, чтобы заполнить анкету игрока и получить доступ к серверу:**", view=RegistrationView())
 
 async def main():
