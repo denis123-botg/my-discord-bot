@@ -41,12 +41,11 @@ conn.commit()
 def update_user_activity(user_id, dt=None):
     if dt is None:
         dt = datetime.now(timezone.utc)
-    # Сохраняем в формате ISO без указания временной зоны для простоты сравнения
     cursor.execute("INSERT OR REPLACE INTO activity (user_id, last_active, warned) VALUES (?, ?, 0)", 
                    (user_id, dt.replace(tzinfo=None).isoformat()))
     conn.commit()
 
-# Проверки прав администратора/модератора
+# Проверки прав
 def has_staff_perms(interaction: discord.Interaction):
     if interaction.user.id == MY_ID: return True
     if interaction.user.guild_permissions.administrator: return True
@@ -192,23 +191,24 @@ class MyBot(commands.Bot):
         
     async def on_ready(self):
         print(f"Бот запущен под именем {self.user}")
-        # НОВОЕ: Авто-синхронизация всех старых участников при запуске бота
         if not self.guilds: return
         guild = self.guilds[0]
         
         player_role = guild.get_role(ROLE_PLAYER)
         if not player_role: return
 
-        print("Запуск проверки старых игроков на сервере...")
+        print("Запуск БЕЗОПАСНОЙ синхронизации участников...")
+        current_time = datetime.now(timezone.utc)
+        
         for member in guild.members:
             if member.bot: continue
             if player_role in member.roles:
                 cursor.execute("SELECT user_id FROM activity WHERE user_id = ?", (member.id,))
                 if cursor.fetchone() is None:
-                    # Если старого игрока нет в базе, ставим ему дату захода на сервер
-                    join_date = member.joined_at if member.joined_at else datetime.now(timezone.utc)
-                    update_user_activity(member.id, join_date)
-        print("Синхронизация базы данных активности успешно завершена!")
+                    # ИСПРАВЛЕНО: Вместо даты захода на сервер мы ставим ТЕКУЩЕЕ время.
+                    # Отсчет 6 дней начнется прямо с этого момента для всех старичков.
+                    update_user_activity(member.id, current_time)
+        print("Синхронизация завершена. Все старые игроки успешно добавлены в очередь без ложных киков!")
 
     async def on_member_join(self, m):
         r = m.guild.get_role(ROLE_CANDIDATE)
@@ -257,7 +257,7 @@ class MyBot(commands.Bot):
                     view=AliveButtonView(user_id)
                 )
 
-            # День 7: Кик
+            # День 7: Кик (сработает только если прошло еще 24 часа после 6-го дня)
             elif days_passed >= 7:
                 cursor.execute("DELETE FROM activity WHERE user_id = ?", (user_id,))
                 conn.commit()
@@ -265,14 +265,15 @@ class MyBot(commands.Bot):
                     await member.kick(reason="Неактивность на сервере в течение 7 дней")
                     await channel.send(f"❌ Игрок **{member.name}** был кикнут с сервера за полную неактивность в течение 7 дней.")
                 except discord.Forbidden:
-                    pass
+                    # Если у бота не хватает прав кикнуть админа/модератора, пишем об этом в чат логов
+                    await channel.send(f"⚠️ Не удалось кикнуть **{member.name}** (у бота недостаточно прав/роль бота ниже роли юзера).")
 
 bot = MyBot()
 
 @bot.command()
 async def установка(ctx):
     if has_cmd_perms(ctx):
-        await ctx.send("**Добро пожаловать в Сирион Хаб! Нажмите кнопку ниже, чтобы заполнить анкету игрока и получить доступ к серверу:**", view=RegistrationView())
+        await ctx.send("**Добро пожаловать в Сирион Хаб! Нажмите кнопку ниже, чтобы заполнить анкету игрока и получить доступ к serverу:**", view=RegistrationView())
 
 async def main():
     await start_server()
