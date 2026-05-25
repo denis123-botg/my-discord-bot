@@ -3,7 +3,7 @@ import os
 import asyncio
 import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from discord.ext import commands, tasks
 from discord.ui import View, Button
 from aiohttp import web
@@ -16,7 +16,7 @@ MY_ID = 1118970574887211038
 ROLE_CANDIDATE = 1259813357763170394     # КАНДИДАТ
 ROLE_PLAYER = 1506372814477988002        # ИГРОК
 ROLE_REGISTERED = 1259828977942528111     # ЗАРЕГИСТРИРОВАН
-ROLE_MODERATOR = 1182036238337855600      # МОДЕРАТОР (Новый доступ)
+ROLE_MODERATOR = 1182036238337855600      # МОДЕРАТОР
 
 # Каналы
 LOG_CHANNEL_ID = 1216754939616039014      
@@ -38,32 +38,27 @@ cursor.execute("""
 """)
 conn.commit()
 
-def update_user_activity(user_id):
-    now = datetime.utcnow().isoformat()
-    cursor.execute("INSERT OR REPLACE INTO activity (user_id, last_active, warned) VALUES (?, ?, 0)", (user_id, now))
+def update_user_activity(user_id, dt=None):
+    if dt is None:
+        dt = datetime.now(timezone.utc)
+    # Сохраняем в формате ISO без указания временной зоны для простоты сравнения
+    cursor.execute("INSERT OR REPLACE INTO activity (user_id, last_active, warned) VALUES (?, ?, 0)", 
+                   (user_id, dt.replace(tzinfo=None).isoformat()))
     conn.commit()
 
-# Проверка: имеет ли пользователь права модератора/админа/владельца бота
+# Проверки прав администратора/модератора
 def has_staff_perms(interaction: discord.Interaction):
-    if interaction.user.id == MY_ID:
-        return True
-    if interaction.user.guild_permissions.administrator:
-        return True
-    # Проверка наличия роли Модератора
+    if interaction.user.id == MY_ID: return True
+    if interaction.user.guild_permissions.administrator: return True
     mod_role = interaction.guild.get_role(ROLE_MODERATOR)
-    if mod_role and mod_role in interaction.user.roles:
-        return True
+    if mod_role and mod_role in interaction.user.roles: return True
     return False
 
-# Проверка для текстовых команд (!установка)
 def has_cmd_perms(ctx):
-    if ctx.author.id == MY_ID:
-        return True
-    if ctx.author.guild_permissions.administrator:
-        return True
+    if ctx.author.id == MY_ID: return True
+    if ctx.author.guild_permissions.administrator: return True
     mod_role = ctx.guild.get_role(ROLE_MODERATOR)
-    if mod_role and mod_role in ctx.author.roles:
-        return True
+    if mod_role and mod_role in ctx.author.roles: return True
     return False
 
 # ================= ВЕБ-СЕРВЕР =================
@@ -137,7 +132,7 @@ class AdminReviewView(View):
             
             update_user_activity(target_id)
             
-            await interaction.response.edit_message(content=interaction.message.content + f"\n\n🟢 **СТАТУС: ОДОБРЕНО** модератором <@{interaction.user.id}>. Пользователю выданы роли <@&{ROLE_PLAYER}> and <@&{ROLE_REGISTERED}>.", view=None)
+            await interaction.response.edit_message(content=interaction.message.content + f"\n\n🟢 **СТАТУС: ОДОБРЕНО** модератором <@{interaction.user.id}>. Пользователю выданы роли <@&{ROLE_PLAYER}> и <@&{ROLE_REGISTERED}>.", view=None)
         else:
             await interaction.response.send_message("❌ Пользователь не найден на сервере.", ephemeral=True)
 
@@ -160,7 +155,6 @@ class AdminReviewView(View):
             await interaction.response.send_message("❌ Пользователь покинул сервер.", ephemeral=True)
             return
 
-        # Настраиваем доступы к чату ответа (включая роль Модератора)
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(read_messages=False),
             member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
@@ -196,6 +190,26 @@ class MyBot(commands.Bot):
         self.add_view(AdminReviewView())
         self.check_activity_loop.start()
         
+    async def on_ready(self):
+        print(f"Бот запущен под именем {self.user}")
+        # НОВОЕ: Авто-синхронизация всех старых участников при запуске бота
+        if not self.guilds: return
+        guild = self.guilds[0]
+        
+        player_role = guild.get_role(ROLE_PLAYER)
+        if not player_role: return
+
+        print("Запуск проверки старых игроков на сервере...")
+        for member in guild.members:
+            if member.bot: continue
+            if player_role in member.roles:
+                cursor.execute("SELECT user_id FROM activity WHERE user_id = ?", (member.id,))
+                if cursor.fetchone() is None:
+                    # Если старого игрока нет в базе, ставим ему дату захода на сервер
+                    join_date = member.joined_at if member.joined_at else datetime.now(timezone.utc)
+                    update_user_activity(member.id, join_date)
+        print("Синхронизация базы данных активности успешно завершена!")
+
     async def on_member_join(self, m):
         r = m.guild.get_role(ROLE_CANDIDATE)
         if r: await m.add_roles(r)
@@ -223,7 +237,7 @@ class MyBot(commands.Bot):
 
         cursor.execute("SELECT user_id, last_active, warned FROM activity")
         rows = cursor.fetchall()
-        now = datetime.utcnow()
+        now = datetime.now()
 
         for user_id, last_active_str, warned in rows:
             member = guild.get_member(user_id)
@@ -233,6 +247,7 @@ class MyBot(commands.Bot):
             last_active = datetime.fromisoformat(last_active_str)
             days_passed = (now - last_active).days
 
+            # День 6: Предупреждение
             if days_passed >= 6 and days_passed < 7 and warned == 0:
                 cursor.execute("UPDATE activity SET warned = 1 WHERE user_id = ?", (user_id,))
                 conn.commit()
@@ -242,6 +257,7 @@ class MyBot(commands.Bot):
                     view=AliveButtonView(user_id)
                 )
 
+            # День 7: Кик
             elif days_passed >= 7:
                 cursor.execute("DELETE FROM activity WHERE user_id = ?", (user_id,))
                 conn.commit()
