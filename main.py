@@ -3,6 +3,7 @@ import os
 import asyncio
 import re
 import sqlite3
+from typing import Union
 from datetime import datetime, timezone, timedelta
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -318,7 +319,7 @@ class MyBot(commands.Bot):
 
 bot = MyBot()
 
-# ================= В КЭШЕ ОСТАЛИСЬ ТОЛЬКО ЭТИ 4 СЛЭШ-КОМАНДЫ =================
+# ================= СЛЭШ-КОМАНДЫ =================
 
 @bot.tree.command(name="установка", description="Установить начальное сообщение с кнопкой анкеты")
 async def _установка(ctx: discord.Interaction):
@@ -377,7 +378,7 @@ async def _автоочистка(ctx: discord.Interaction, тип_времен�
     app_commands.Choice(name="Список персонала", value="list")
 ])
 @app_commands.describe(выбор_объекта="Выберите пользователя или роль на сервере")
-async def _доступ(ctx: discord.Interaction, действие: str, выбор_объекта: discord.Mentionable = None):
+async def _доступ(ctx: discord.Interaction, действие: str, выбор_объекта: Union[discord.Member, discord.Role] = None):
     if ctx.user.id != MY_ID and not ctx.user.guild_permissions.administrator:
         await ctx.response.send_message("❌ Настройка доступов доступна только Главному Администратору.", ephemeral=True)
         return
