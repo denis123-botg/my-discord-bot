@@ -86,41 +86,6 @@ async def start_server():
     await runner.setup()
     await web.TCPSite(runner, '0.0.0.0', int(os.getenv("PORT", 10000))).start()
 
-# ================= Вспомогательная логика принятия/отказа игроков =================
-async def process_approve(interaction: discord.Interaction, target_id: int):
-    member = interaction.guild.get_member(target_id)
-    if member:
-        r_play = interaction.guild.get_role(ROLE_PLAYER)
-        r_reg = interaction.guild.get_role(ROLE_REGISTERED)
-        r_cand = interaction.guild.get_role(ROLE_CANDIDATE)
-        
-        roles_to_add = [r for r in [r_play, r_reg] if r]
-        if roles_to_add: await member.add_roles(*roles_to_add)
-        if r_cand: await member.remove_roles(r_cand)
-        
-        update_user_activity(target_id)
-        return True
-    return False
-
-async def process_deny(interaction: discord.Interaction, target_id: int):
-    global deny_counter
-    guild = interaction.guild
-    member = guild.get_member(target_id)
-    if not member: 
-        return None
-
-    deny_counter += 1
-    overwrites = {
-        guild.default_role: discord.PermissionOverwrite(read_messages=False),
-        member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-        guild.get_member(MY_ID): discord.PermissionOverwrite(read_messages=True, send_messages=True),
-        guild.get_role(ROLE_MODERATOR): discord.PermissionOverwrite(read_messages=True, send_messages=True)
-    }
-    category = guild.get_channel(CATEGORY_DENY)
-    ch = await guild.create_text_channel(f"отказ-{deny_counter}", category=category, overwrites=overwrites)
-    await ch.send(f"⚠️ <@{target_id}>, ваша анкета отклонена. Ожидайте модератора в этом канале.", view=DenyChatView())
-    return ch
-
 # ================= VIEWS =================
 class AliveButtonView(View):
     def __init__(self, target_id):
@@ -160,34 +125,46 @@ class AdminReviewView(View):
     @discord.ui.button(label="Принять ✅", style=discord.ButtonStyle.green, custom_id="admin_approve_btn")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not check_staff_permission(interaction.user):
-            await interaction.response.send_message("❌ У вас нет доступа к управлению анкетами.", ephemeral=True)
+            await interaction.response.send_message("❌ У вас нет доступа.", ephemeral=True)
             return
         target_id = self.get_target_id(interaction.message.content)
-        if not target_id:
-            await interaction.response.send_message("❌ Не удалось определить ID пользователя.", ephemeral=True)
-            return
+        if not target_id: return
 
-        success = await process_approve(interaction, target_id)
-        if success:
+        member = interaction.guild.get_member(target_id)
+        if member:
+            r_play = interaction.guild.get_role(ROLE_PLAYER)
+            r_reg = interaction.guild.get_role(ROLE_REGISTERED)
+            r_cand = interaction.guild.get_role(ROLE_CANDIDATE)
+            if r_play: await member.add_roles(r_play)
+            if r_reg: await member.add_roles(r_reg)
+            if r_cand: await member.remove_roles(r_cand)
+            update_user_activity(target_id)
             await interaction.response.edit_message(content=interaction.message.content + f"\n\n🟢 **СТАТУС: ОДОБРЕНО** модератором <@{interaction.user.id}>.", view=None)
-        else:
-            await interaction.response.send_message("❌ Пользователь не найден на сервере.", ephemeral=True)
 
     @discord.ui.button(label="Отказать ❌", style=discord.ButtonStyle.danger, custom_id="admin_deny_btn")
     async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not check_staff_permission(interaction.user):
-            await interaction.response.send_message("❌ У вас нет доступа к управлению анкетами.", ephemeral=True)
+            await interaction.response.send_message("❌ У вас нет доступа.", ephemeral=True)
             return
         target_id = self.get_target_id(interaction.message.content)
-        if not target_id:
-            await interaction.response.send_message("❌ Не удалось определить ID пользователя.", ephemeral=True)
-            return
+        if not target_id: return
 
-        ch = await process_deny(interaction, target_id)
-        if ch:
-            await interaction.response.edit_message(content=interaction.message.content + f"\n\n🔴 **СТАТУС: ОТКЛОНЕНО** модератором <@{interaction.user.id}>.\n💬 Чат разбора: {ch.mention}", view=None)
-        else:
-            await interaction.response.send_message("❌ Пользователь не найден на сервере.", ephemeral=True)
+        global deny_counter
+        guild = interaction.guild
+        member = guild.get_member(target_id)
+        if not member: return
+
+        deny_counter += 1
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(read_messages=False),
+            member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+            guild.get_member(MY_ID): discord.PermissionOverwrite(read_messages=True, send_messages=True),
+            guild.get_role(ROLE_MODERATOR): discord.PermissionOverwrite(read_messages=True, send_messages=True)
+        }
+        category = guild.get_channel(CATEGORY_DENY)
+        ch = await guild.create_text_channel(f"отказ-{deny_counter}", category=category, overwrites=overwrites)
+        await ch.send(f"⚠️ <@{target_id}>, ваша анкета отклонена. Ожидайте модератора в этом канале.", view=DenyChatView())
+        await interaction.response.edit_message(content=interaction.message.content + f"\n\n🔴 **СТАТУС: ОТКЛОНЕНО** модератором <@{interaction.user.id}>.\n💬 Чат разбора: {ch.mention}", view=None)
 
 class RegistrationView(View):
     def __init__(self):
@@ -215,9 +192,11 @@ class MyBot(commands.Bot):
         if not self.guilds: return
         guild = self.guilds[0]
         
+        # Полный сброс глобального кэша и чистая регистрация новых слэш-команд
         try:
+            self.tree.clear_commands(guild=None)
             await self.tree.sync()
-            print("Слэш-команды полностью синхронизированы в Discord!")
+            print("Слэш-команды полностью обновлены и синхронизированы в Discord!")
         except Exception as e:
             print(f"Ошибка синхронизации слэш-команд: {e}")
             
@@ -290,8 +269,8 @@ class MyBot(commands.Bot):
                 except discord.Forbidden:
                     await channel.send(f"⚠️ Не удалось кикнуть **{member.name}** (нет прав).")
 
-    # ИСПРАВЛЕНО: Теперь автоочистка проверяет У СРОКА каждого индивидуального сообщения отдельно
-    @tasks.loop(minutes=15)
+    # ИСПРАВЛЕНО: Быстрая мгновенная пачечная очистка старых сообщений одной командой
+    @tasks.loop(minutes=30)
     async def auto_purge_loop(self):
         await self.wait_until_ready()
         cursor.execute("SELECT channel_id, days_old FROM auto_purge")
@@ -303,19 +282,17 @@ class MyBot(commands.Bot):
             channel = self.get_channel(ch_id)
             if not channel: continue
             
+            # Точка отсечения времени (все сообщения ДО нее будут стерты мгновенно)
             cutoff = now - timedelta(days=days)
             try:
-                # Фильтр: удаляет только те сообщения, у которых индивидуальный таймер жизни истек
-                def should_delete(message):
-                    return message.created_at < cutoff and not message.pinned
-                
-                await channel.purge(limit=200, check=should_delete, before=now)
-            except Exception:
+                # Удаляет сообщения пачкой до указанной даты (кроме закрепленных)
+                await channel.purge(limit=500, before=cutoff, check=lambda m: not m.pinned)
+            except Exception: 
                 pass
 
 bot = MyBot()
 
-# ================= СЛЭШ-КОМАНДЫ =================
+# ================= ЧЕТЫРЕ ТРЕБУЕМЫЕ СЛЭШ-КОМАНДЫ =================
 
 @bot.tree.command(name="установка", description="Установить начальное сообщение с кнопкой анкеты")
 async def _установка(ctx: discord.Interaction):
@@ -339,7 +316,7 @@ async def _очистить(ctx: discord.Interaction, количество: int)
     await ctx.followup.send(f"✅ Успешно удалено сообщений: {len(deleted)}.", ephemeral=True)
 
 @bot.tree.command(name="автоочистка", description="Настроить автоматическую очистку старых сообщений в этом канале")
-@app_commands.describe(дней="Каждое сообщение удалится индивидуально через Х дней после его отправки (0 - выкл)")
+@app_commands.describe(дней="Удалять сообщения старше этого количества дней пачкой (0 - отключить)")
 async def _автоочистка(ctx: discord.Interaction, дней: int):
     if not check_staff_permission(ctx.user):
         await ctx.response.send_message("❌ У вас нет доступа.", ephemeral=True)
@@ -347,20 +324,19 @@ async def _автоочистка(ctx: discord.Interaction, дней: int):
     if дней <= 0:
         cursor.execute("DELETE FROM auto_purge WHERE channel_id = ?", (ctx.channel_id,))
         conn.commit()
-        await ctx.response.send_message("🛑 Индивидуальная автоочистка для этого канала отключена.", ephemeral=True)
+        await ctx.response.send_message("🛑 Автоочистка для этого канала полностью отключена.", ephemeral=True)
     else:
         cursor.execute("INSERT OR REPLACE INTO auto_purge (channel_id, days_old) VALUES (?, ?)", (ctx.channel_id, дней))
         conn.commit()
-        await ctx.response.send_message(f"⚙️ Включено! Теперь каждое сообщение в этом канале будет удаляться ровно через {дней} дн. с момента его написания.", ephemeral=True)
+        await ctx.response.send_message(f"⚙️ Включено! Каждые 30 минут бот будет мгновенно стирать сообщения старше {дней} дней.", ephemeral=True)
 
-@bot.tree.command(name="доступ", description="Управление правами доступа к командам бота")
+@bot.tree.command(name="доступ", description="Управление правами доступа к командама бота")
 @app_commands.choices(действие=[
     app_commands.Choice(name="Добавить доступ", value="add"),
     app_commands.Choice(name="Забрать доступ", value="remove"),
     app_commands.Choice(name="Список персонала", value="list")
 ])
 @app_commands.describe(выбор_объекта="Выберите пользователя или роль на сервере")
-# ИСПРАВЛЕНО: Теперь объект выбирается через удобное встроенное меню Дискорда
 async def _доступ(ctx: discord.Interaction, действие: str, выбор_объекта: discord.Mentionable = None):
     if ctx.user.id != MY_ID and not ctx.user.guild_permissions.administrator:
         await ctx.response.send_message("❌ Настройка доступов доступна только Главному Администратору.", ephemeral=True)
@@ -386,37 +362,11 @@ async def _доступ(ctx: discord.Interaction, действие: str, выб�
     if действие == "add":
         cursor.execute("INSERT OR REPLACE INTO staff_access (target_id, type) VALUES (?, 'custom')", (target_id,))
         conn.commit()
-        await ctx.response.send_message(f"✅ Доступ для {выбор_объекта.mention} (ID: `{target_id}`) успешно выдан.", ephemeral=True)
+        await ctx.response.send_message(f"✅ Доступ для {выбор_объекта.mention} успешно выдан.", ephemeral=True)
     elif действие == "remove":
         cursor.execute("DELETE FROM staff_access WHERE target_id = ?", (target_id,))
         conn.commit()
-        await ctx.response.send_message(f"➖ Доступ для {выбор_объекта.mention} (ID: `{target_id}`) успешно аннулирован.", ephemeral=True)
-
-@bot.tree.command(name="принять", description="Вручную принять игрока")
-@app_commands.describe(пользователь="Кого необходимо принять")
-async def _принять(ctx: discord.Interaction, пользователь: discord.Member):
-    if not check_staff_permission(ctx.user):
-        await ctx.response.send_message("❌ У вас нет прав.", ephemeral=True)
-        return
-    await ctx.response.defer(ephemeral=True)
-    success = await process_approve(ctx, пользователь.id)
-    if success:
-        await ctx.followup.send(f"✅ Игрок <@{пользователь.id}> успешно принят!", ephemeral=True)
-    else:
-        await ctx.followup.send("❌ Не удалось выдать роли пользователю.", ephemeral=True)
-
-@bot.tree.command(name="отказать", description="Вручную отказать игроку")
-@app_commands.describe(пользователь="Кому необходимо отказать")
-async def _отказать(ctx: discord.Interaction, пользователь: discord.Member):
-    if not check_staff_permission(ctx.user):
-        await ctx.response.send_message("❌ У вас нет прав.", ephemeral=True)
-        return
-    await ctx.response.defer(ephemeral=True)
-    ch = await process_deny(ctx, пользователь.id)
-    if ch:
-        await ctx.followup.send(f"🔴 Игрок отклонён. Создан чат разбора: {ch.mention}", ephemeral=True)
-    else:
-        await ctx.followup.send("❌ Пользователь не найден на сервере.", ephemeral=True)
+        await ctx.response.send_message(f"➖ Доступ для {выбор_объекта.mention} успешно аннулирован.", ephemeral=True)
 
 # ================= ЗАПУСК БОТА =================
 async def main():
