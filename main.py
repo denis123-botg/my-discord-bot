@@ -46,7 +46,6 @@ cursor.execute("""
     )
 """)
 
-# Таблица изменена, чтобы хранить тип времени (минуты/часы) и его количество
 cursor.execute("""
     CREATE TABLE IF NOT EXISTS auto_purge (
         channel_id INTEGER PRIMARY KEY,
@@ -87,6 +86,41 @@ async def start_server():
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, '0.0.0.0', int(os.getenv("PORT", 10000))).start()
+
+# ================= ЛОГИКА ДЛЯ КНОПОК ПРИНЯТИЯ И ОТКАЗА =================
+async def process_approve(interaction: discord.Interaction, target_id: int):
+    member = interaction.guild.get_member(target_id)
+    if member:
+        r_play = interaction.guild.get_role(ROLE_PLAYER)
+        r_reg = interaction.guild.get_role(ROLE_REGISTERED)
+        r_cand = interaction.guild.get_role(ROLE_CANDIDATE)
+        
+        roles_to_add = [r for r in [r_play, r_reg] if r]
+        if roles_to_add: await member.add_roles(*roles_to_add)
+        if r_cand: await member.remove_roles(r_cand)
+        
+        update_user_activity(target_id)
+        return True
+    return False
+
+async def process_deny(interaction: discord.Interaction, target_id: int):
+    global deny_counter
+    guild = interaction.guild
+    member = guild.get_member(target_id)
+    if not member: 
+        return None
+
+    deny_counter += 1
+    overwrites = {
+        guild.default_role: discord.PermissionOverwrite(read_messages=False),
+        member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+        guild.get_member(MY_ID): discord.PermissionOverwrite(read_messages=True, send_messages=True),
+        guild.get_role(ROLE_MODERATOR): discord.PermissionOverwrite(read_messages=True, send_messages=True)
+    }
+    category = guild.get_channel(CATEGORY_DENY)
+    ch = await guild.create_text_channel(f"отказ-{deny_counter}", category=category, overwrites=overwrites)
+    await ch.send(f"⚠️ <@{target_id}>, ваша анкета отклонена. Ожидайте модератора в этом канале.", view=DenyChatView())
+    return ch
 
 # ================= VIEWS =================
 class AliveButtonView(View):
@@ -130,18 +164,15 @@ class AdminReviewView(View):
             await interaction.response.send_message("❌ У вас нет доступа к управлению анкетами.", ephemeral=True)
             return
         target_id = self.get_target_id(interaction.message.content)
-        if not target_id: return
+        if not target_id:
+            await interaction.response.send_message("❌ Не удалось определить ID пользователя.", ephemeral=True)
+            return
 
-        member = interaction.guild.get_member(target_id)
-        if member:
-            r_play = interaction.guild.get_role(ROLE_PLAYER)
-            r_reg = interaction.guild.get_role(ROLE_REGISTERED)
-            r_cand = interaction.guild.get_role(ROLE_CANDIDATE)
-            if r_play: await member.add_roles(r_play)
-            if r_reg: await member.add_roles(r_reg)
-            if r_cand: await member.remove_roles(r_cand)
-            update_user_activity(target_id)
+        success = await process_approve(interaction, target_id)
+        if success:
             await interaction.response.edit_message(content=interaction.message.content + f"\n\n🟢 **СТАТУС: ОДОБРЕНО** модератором <@{interaction.user.id}>.", view=None)
+        else:
+            await interaction.response.send_message("❌ Пользователь не найден на сервере.", ephemeral=True)
 
     @discord.ui.button(label="Отказать ❌", style=discord.ButtonStyle.danger, custom_id="admin_deny_btn")
     async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -149,24 +180,15 @@ class AdminReviewView(View):
             await interaction.response.send_message("❌ У вас нет доступа к управлению анкетами.", ephemeral=True)
             return
         target_id = self.get_target_id(interaction.message.content)
-        if not target_id: return
+        if not target_id:
+            await interaction.response.send_message("❌ Не удалось определить ID пользователя.", ephemeral=True)
+            return
 
-        global deny_counter
-        guild = interaction.guild
-        member = guild.get_member(target_id)
-        if not member: return
-
-        deny_counter += 1
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(read_messages=False),
-            member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-            guild.get_member(MY_ID): discord.PermissionOverwrite(read_messages=True, send_messages=True),
-            guild.get_role(ROLE_MODERATOR): discord.PermissionOverwrite(read_messages=True, send_messages=True)
-        }
-        category = guild.get_channel(CATEGORY_DENY)
-        ch = await guild.create_text_channel(f"отказ-{deny_counter}", category=category, overwrites=overwrites)
-        await ch.send(f"⚠️ <@{target_id}>, ваша анкета отклонена. Ожидайте модератора в этом канале.", view=DenyChatView())
-        await interaction.response.edit_message(content=interaction.message.content + f"\n\n🔴 **СТАТУС: ОТКЛОНЕНО** модератором <@{interaction.user.id}>.\n💬 Чат разбора: {ch.mention}", view=None)
+        ch = await process_deny(interaction, target_id)
+        if ch:
+            await interaction.response.edit_message(content=interaction.message.content + f"\n\n🔴 **СТАТУС: ОТКЛОНЕНО** модератором <@{interaction.user.id}>.\n💬 Чат разбора: {ch.mention}", view=None)
+        else:
+            await interaction.response.send_message("❌ Пользователь покинул сервер.", ephemeral=True)
 
 class RegistrationView(View):
     def __init__(self):
@@ -194,7 +216,7 @@ class MyBot(commands.Bot):
         if not self.guilds: return
         guild = self.guilds[0]
         
-        # КРИТИЧЕСКИЙ СБРОС КЭША: гарантирует появление всех команд в Discord
+        # Полное принудительное обновление дерева команд
         try:
             self.tree.clear_commands(guild=None)
             await self.tree.sync()
@@ -271,7 +293,7 @@ class MyBot(commands.Bot):
                 except discord.Forbidden:
                     await channel.send(f"⚠️ Не удалось кикнуть **{member.name}** (нет прав).")
 
-    # Автоочистка запускается часто (каждые 2 минуты) для точности удаления
+    # Мгновенная очистка пачкой по редактируемому времени
     @tasks.loop(minutes=2)
     async def auto_purge_loop(self):
         await self.wait_until_ready()
@@ -284,21 +306,19 @@ class MyBot(commands.Bot):
             channel = self.get_channel(ch_id)
             if not channel: continue
             
-            # Быстрое вычисление точного срока
             if t_type == "minutes":
                 cutoff = now - timedelta(minutes=val)
             else:
                 cutoff = now - timedelta(hours=val)
                 
             try:
-                # Мгновенная очистка пачкой до высчитанной даты
                 await channel.purge(limit=500, before=cutoff, check=lambda m: not m.pinned)
             except Exception: 
                 pass
 
 bot = MyBot()
 
-# ================= ВСЕ 4 НЕОБХОДИМЫЕ СЛЭШ-КОМАНДЫ =================
+# ================= В КЭШЕ ОСТАЛИСЬ ТОЛЬКО ЭТИ 4 СЛЭШ-КОМАНДЫ =================
 
 @bot.tree.command(name="установка", description="Установить начальное сообщение с кнопкой анкеты")
 async def _установка(ctx: discord.Interaction):
@@ -343,7 +363,6 @@ async def _автоочистка(ctx: discord.Interaction, тип_времен�
         await ctx.response.send_message("❌ Вы должны указать числовое значение времени больше нуля!", ephemeral=True)
         return
 
-    # Запись настроек времени в базу данных
     cursor.execute("INSERT OR REPLACE INTO auto_purge (channel_id, time_value, time_type) VALUES (?, ?, ?)", 
                    (ctx.channel_id, значение, тип_времени))
     conn.commit()
