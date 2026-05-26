@@ -46,10 +46,12 @@ cursor.execute("""
     )
 """)
 
+# Таблица изменена, чтобы хранить тип времени (минуты/часы) и его количество
 cursor.execute("""
     CREATE TABLE IF NOT EXISTS auto_purge (
         channel_id INTEGER PRIMARY KEY,
-        days_old INTEGER
+        time_value INTEGER,
+        time_type TEXT
     )
 """)
 conn.commit()
@@ -125,7 +127,7 @@ class AdminReviewView(View):
     @discord.ui.button(label="Принять ✅", style=discord.ButtonStyle.green, custom_id="admin_approve_btn")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not check_staff_permission(interaction.user):
-            await interaction.response.send_message("❌ У вас нет доступа.", ephemeral=True)
+            await interaction.response.send_message("❌ У вас нет доступа к управлению анкетами.", ephemeral=True)
             return
         target_id = self.get_target_id(interaction.message.content)
         if not target_id: return
@@ -144,7 +146,7 @@ class AdminReviewView(View):
     @discord.ui.button(label="Отказать ❌", style=discord.ButtonStyle.danger, custom_id="admin_deny_btn")
     async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not check_staff_permission(interaction.user):
-            await interaction.response.send_message("❌ У вас нет доступа.", ephemeral=True)
+            await interaction.response.send_message("❌ У вас нет доступа к управлению анкетами.", ephemeral=True)
             return
         target_id = self.get_target_id(interaction.message.content)
         if not target_id: return
@@ -192,11 +194,11 @@ class MyBot(commands.Bot):
         if not self.guilds: return
         guild = self.guilds[0]
         
-        # Полный сброс глобального кэша и чистая регистрация новых слэш-команд
+        # КРИТИЧЕСКИЙ СБРОС КЭША: гарантирует появление всех команд в Discord
         try:
             self.tree.clear_commands(guild=None)
             await self.tree.sync()
-            print("Слэш-команды полностью обновлены и синхронизированы в Discord!")
+            print("Слэш-команды успешно прописаны и обновлены в Discord!")
         except Exception as e:
             print(f"Ошибка синхронизации слэш-команд: {e}")
             
@@ -269,30 +271,34 @@ class MyBot(commands.Bot):
                 except discord.Forbidden:
                     await channel.send(f"⚠️ Не удалось кикнуть **{member.name}** (нет прав).")
 
-    # ИСПРАВЛЕНО: Быстрая мгновенная пачечная очистка старых сообщений одной командой
-    @tasks.loop(minutes=30)
+    # Автоочистка запускается часто (каждые 2 минуты) для точности удаления
+    @tasks.loop(minutes=2)
     async def auto_purge_loop(self):
         await self.wait_until_ready()
-        cursor.execute("SELECT channel_id, days_old FROM auto_purge")
+        cursor.execute("SELECT channel_id, time_value, time_type FROM auto_purge")
         channels = cursor.fetchall()
         
         now = datetime.now(timezone.utc)
         
-        for ch_id, days in channels:
+        for ch_id, val, t_type in channels:
             channel = self.get_channel(ch_id)
             if not channel: continue
             
-            # Точка отсечения времени (все сообщения ДО нее будут стерты мгновенно)
-            cutoff = now - timedelta(days=days)
+            # Быстрое вычисление точного срока
+            if t_type == "minutes":
+                cutoff = now - timedelta(minutes=val)
+            else:
+                cutoff = now - timedelta(hours=val)
+                
             try:
-                # Удаляет сообщения пачкой до указанной даты (кроме закрепленных)
+                # Мгновенная очистка пачкой до высчитанной даты
                 await channel.purge(limit=500, before=cutoff, check=lambda m: not m.pinned)
             except Exception: 
                 pass
 
 bot = MyBot()
 
-# ================= ЧЕТЫРЕ ТРЕБУЕМЫЕ СЛЭШ-КОМАНДЫ =================
+# ================= ВСЕ 4 НЕОБХОДИМЫЕ СЛЭШ-КОМАНДЫ =================
 
 @bot.tree.command(name="установка", description="Установить начальное сообщение с кнопкой анкеты")
 async def _установка(ctx: discord.Interaction):
@@ -316,21 +322,36 @@ async def _очистить(ctx: discord.Interaction, количество: int)
     await ctx.followup.send(f"✅ Успешно удалено сообщений: {len(deleted)}.", ephemeral=True)
 
 @bot.tree.command(name="автоочистка", description="Настроить автоматическую очистку старых сообщений в этом канале")
-@app_commands.describe(дней="Удалять сообщения старше этого количества дней пачкой (0 - отключить)")
-async def _автоочистка(ctx: discord.Interaction, дней: int):
+@app_commands.choices(тип_времени=[
+    app_commands.Choice(name="Минуты", value="minutes"),
+    app_commands.Choice(name="Часы", value="hours"),
+    app_commands.Choice(name="Отключить автоочистку", value="off")
+])
+@app_commands.describe(тип_времени="В чем измерять срок жизни сообщений", значение="Какое время выставить (пропусти, если отключаешь)")
+async def _автоочистка(ctx: discord.Interaction, тип_времени: str, значение: int = None):
     if not check_staff_permission(ctx.user):
         await ctx.response.send_message("❌ У вас нет доступа.", ephemeral=True)
         return
-    if дней <= 0:
+        
+    if тип_времени == "off":
         cursor.execute("DELETE FROM auto_purge WHERE channel_id = ?", (ctx.channel_id,))
         conn.commit()
         await ctx.response.send_message("🛑 Автоочистка для этого канала полностью отключена.", ephemeral=True)
-    else:
-        cursor.execute("INSERT OR REPLACE INTO auto_purge (channel_id, days_old) VALUES (?, ?)", (ctx.channel_id, дней))
-        conn.commit()
-        await ctx.response.send_message(f"⚙️ Включено! Каждые 30 минут бот будет мгновенно стирать сообщения старше {дней} дней.", ephemeral=True)
+        return
 
-@bot.tree.command(name="доступ", description="Управление правами доступа к командама бота")
+    if значение is None or значение < 1:
+        await ctx.response.send_message("❌ Вы должны указать числовое значение времени больше нуля!", ephemeral=True)
+        return
+
+    # Запись настроек времени в базу данных
+    cursor.execute("INSERT OR REPLACE INTO auto_purge (channel_id, time_value, time_type) VALUES (?, ?, ?)", 
+                   (ctx.channel_id, значение, тип_времени))
+    conn.commit()
+    
+    label = "мин." if тип_времени == "minutes" else "ч."
+    await ctx.response.send_message(f"⚙️ Срок успешно изменен! Теперь сообщения старше **{значение} {label}** будут мгновенно стираться пачкой.", ephemeral=True)
+
+@bot.tree.command(name="доступ", description="Управление правами доступа к командам бота")
 @app_commands.choices(действие=[
     app_commands.Choice(name="Добавить доступ", value="add"),
     app_commands.Choice(name="Забрать доступ", value="remove"),
