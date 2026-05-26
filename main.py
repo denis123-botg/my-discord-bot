@@ -79,7 +79,7 @@ def check_staff_permission(user: discord.Member) -> bool:
         
     return False
 
-# ================= ВЕБ-СЕРВЕР =================
+# ================= ВЕБ-СЕРВЕР ДЛЯ RENDER =================
 async def handle(request): return web.Response(text="Work")
 async def start_server():
     app = web.Application()
@@ -88,7 +88,7 @@ async def start_server():
     await runner.setup()
     await web.TCPSite(runner, '0.0.0.0', int(os.getenv("PORT", 10000))).start()
 
-# ================= ЛОГИКА ДЛЯ КНОПОК ПРИНЯТИЯ И ОТКАЗА =================
+# ================= ЛОГИКА ДЛЯ РАБОТЫ КНОПОК ПРИНЯТИЯ И ОТКАЗА =================
 async def process_approve(interaction: discord.Interaction, target_id: int):
     member = interaction.guild.get_member(target_id)
     if member:
@@ -217,7 +217,7 @@ class MyBot(commands.Bot):
         if not self.guilds: return
         guild = self.guilds[0]
         
-        # Полное принудительное обновление дерева команд
+        # Полное обновление дерева команд (убирает старые команды принять/отказать)
         try:
             self.tree.clear_commands(guild=None)
             await self.tree.sync()
@@ -294,7 +294,7 @@ class MyBot(commands.Bot):
                 except discord.Forbidden:
                     await channel.send(f"⚠️ Не удалось кикнуть **{member.name}** (нет прав).")
 
-    # Мгновенная очистка пачкой по редактируемому времени
+    # Мгновенная пачечная очистка по заданному времени
     @tasks.loop(minutes=2)
     async def auto_purge_loop(self):
         await self.wait_until_ready()
@@ -319,7 +319,7 @@ class MyBot(commands.Bot):
 
 bot = MyBot()
 
-# ================= СЛЭШ-КОМАНДЫ =================
+# ================= ОСТАВШИЕСЯ 4 СЛЭШ-КОМАНДЫ =================
 
 @bot.tree.command(name="установка", description="Установить начальное сообщение с кнопкой анкеты")
 async def _установка(ctx: discord.Interaction):
