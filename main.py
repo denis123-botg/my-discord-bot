@@ -3,7 +3,8 @@ import os
 import asyncio
 import re
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from discord import app_commands
 from discord.ext import commands, tasks
 from discord.ui import View, Button
 from aiohttp import web
@@ -29,11 +30,29 @@ deny_counter = 0
 # ================= ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ =================
 conn = sqlite3.connect("activity.db")
 cursor = conn.cursor()
+
+# Таблица активности
 cursor.execute("""
     CREATE TABLE IF NOT EXISTS activity (
         user_id INTEGER PRIMARY KEY,
         last_active TEXT,
         warned INTEGER DEFAULT 0
+    )
+""")
+
+# Таблица кастомных доступов к боту (роли или юзеры)
+cursor.execute("""
+    CREATE TABLE IF NOT EXISTS staff_access (
+        target_id INTEGER PRIMARY KEY,
+        type TEXT
+    )
+""")
+
+# Таблица авто-очистки каналов
+cursor.execute("""
+    CREATE TABLE IF NOT EXISTS auto_purge (
+        channel_id INTEGER PRIMARY KEY,
+        days_old INTEGER
     )
 """)
 conn.commit()
@@ -45,19 +64,23 @@ def update_user_activity(user_id, dt=None):
                    (user_id, dt.replace(tzinfo=None).isoformat()))
     conn.commit()
 
-# Проверки прав
-def has_staff_perms(interaction: discord.Interaction):
-    if interaction.user.id == MY_ID: return True
-    if interaction.user.guild_permissions.administrator: return True
-    mod_role = interaction.guild.get_role(ROLE_MODERATOR)
-    if mod_role and mod_role in interaction.user.roles: return True
-    return False
-
-def has_cmd_perms(ctx):
-    if ctx.author.id == MY_ID: return True
-    if ctx.author.guild_permissions.administrator: return True
-    mod_role = ctx.guild.get_role(ROLE_MODERATOR)
-    if mod_role and mod_role in ctx.author.roles: return True
+# Универсальная проверка прав на использование команд бота
+def check_staff_permission(user: discord.Member) -> bool:
+    if user.id == MY_ID: return True
+    if user.guild_permissions.administrator: return True
+    
+    # Проверка роли модератора по умолчанию
+    mod_role = user.guild.get_role(ROLE_MODERATOR)
+    if mod_role and mod_role in user.roles: return True
+    
+    # Проверка кастомных доступов из базы данных
+    cursor.execute("SELECT target_id FROM staff_access")
+    allowed_ids = [row[0] for row in cursor.fetchall()]
+    
+    if user.id in allowed_ids: return True
+    for role in user.roles:
+        if role.id in allowed_ids: return True
+        
     return False
 
 # ================= ВЕБ-СЕРВЕР =================
@@ -92,7 +115,7 @@ class DenyChatView(View):
 
     @discord.ui.button(label="Удалить чат 🗑️", style=discord.ButtonStyle.danger, custom_id="del_ch_final")
     async def delete_chat(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if has_staff_perms(interaction):
+        if check_staff_permission(interaction.user):
             await interaction.response.send_message("Удаление чата через 2 секунды...")
             await asyncio.sleep(2)
             await interaction.channel.delete()
@@ -110,8 +133,8 @@ class AdminReviewView(View):
 
     @discord.ui.button(label="Принять ✅", style=discord.ButtonStyle.green, custom_id="admin_approve_btn")
     async def approve(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not has_staff_perms(interaction):
-            await interaction.response.send_message("❌ Доступно только администрации и модераторам.", ephemeral=True)
+        if not check_staff_permission(interaction.user):
+            await interaction.response.send_message("❌ У вас нет доступа к управлению анкетами.", ephemeral=True)
             return
             
         target_id = self.get_target_id(interaction.message.content)
@@ -137,8 +160,8 @@ class AdminReviewView(View):
 
     @discord.ui.button(label="Отказать ❌", style=discord.ButtonStyle.danger, custom_id="admin_deny_btn")
     async def deny(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if not has_staff_perms(interaction):
-            await interaction.response.send_message("❌ Доступно только администрации и модераторам.", ephemeral=True)
+        if not check_staff_permission(interaction.user):
+            await interaction.response.send_message("❌ У вас нет доступа к управлению анкетами.", ephemeral=True)
             return
             
         target_id = self.get_target_id(interaction.message.content)
@@ -162,7 +185,7 @@ class AdminReviewView(View):
         }
         category = guild.get_channel(CATEGORY_DENY)
         ch = await guild.create_text_channel(f"отказ-{deny_counter}", category=category, overwrites=overwrites)
-        await ch.send(f"⚠️ <@{target_id}>, ваша анкета отклонена. Ожидайте модератора в этом канале.", view=DenyChatView())
+        await ch.send(f"⚠️ <@{target_id}>, ваша анекта отклонена. Ожидайте модератора в этом канале.", view=DenyChatView())
         
         await interaction.response.edit_message(content=interaction.message.content + f"\n\n🔴 **СТАТУС: ОТКЛОНЕНО** модератором <@{interaction.user.id}>.\n💬 Чат разбора: {ch.mention}", view=None)
 
@@ -187,17 +210,23 @@ class MyBot(commands.Bot):
         self.add_view(RegistrationView())
         self.add_view(DenyChatView())
         self.add_view(AdminReviewView())
-        self.check_activity_loop.start()
         
     async def on_ready(self):
         print(f"Бот запущен под именем {self.user}")
         if not self.guilds: return
         guild = self.guilds[0]
         
+        # Регистрация слэш-команд на сервере
+        try:
+            await self.tree.sync()
+            print("Слэш-команды успешно синхронизированы!")
+        except Exception as e:
+            print(f"Ошибка синхронизации слэш-команд: {e}")
+            
         player_role = guild.get_role(ROLE_PLAYER)
         if not player_role: return
 
-        print("Запуск БЕЗОПАСНОЙ синхронизации участников...")
+        print("Запуск БЕЗОПАСНОЙ очистки и синхронизации...")
         current_time = datetime.now(timezone.utc)
         
         for member in guild.members:
@@ -205,10 +234,14 @@ class MyBot(commands.Bot):
             if player_role in member.roles:
                 cursor.execute("SELECT user_id FROM activity WHERE user_id = ?", (member.id,))
                 if cursor.fetchone() is None:
-                    # ИСПРАВЛЕНО: Вместо даты захода на сервер мы ставим ТЕКУЩЕЕ время.
-                    # Отсчет 6 дней начнется прямо с этого момента для всех старичков.
                     update_user_activity(member.id, current_time)
-        print("Синхронизация завершена. Все старые игроки успешно добавлены в очередь без ложных киков!")
+                
+        print("База данных успешно сброшена на безопасный режим.")
+        
+        if not self.check_activity_loop.is_running():
+            self.check_activity_loop.start()
+        if not self.auto_purge_loop.is_running():
+            self.auto_purge_loop.start()
 
     async def on_member_join(self, m):
         r = m.guild.get_role(ROLE_CANDIDATE)
@@ -224,8 +257,8 @@ class MyBot(commands.Bot):
             return
 
         update_user_activity(m.author.id)
-        await self.process_commands(m)
 
+    # Проверка активности раз в час
     @tasks.loop(hours=1)
     async def check_activity_loop(self):
         await self.wait_until_ready()
@@ -247,7 +280,6 @@ class MyBot(commands.Bot):
             last_active = datetime.fromisoformat(last_active_str)
             days_passed = (now - last_active).days
 
-            # День 6: Предупреждение
             if days_passed >= 6 and days_passed < 7 and warned == 0:
                 cursor.execute("UPDATE activity SET warned = 1 WHERE user_id = ?", (user_id,))
                 conn.commit()
@@ -257,7 +289,6 @@ class MyBot(commands.Bot):
                     view=AliveButtonView(user_id)
                 )
 
-            # День 7: Кик (сработает только если прошло еще 24 часа после 6-го дня)
             elif days_passed >= 7:
                 cursor.execute("DELETE FROM activity WHERE user_id = ?", (user_id,))
                 conn.commit()
@@ -265,16 +296,116 @@ class MyBot(commands.Bot):
                     await member.kick(reason="Неактивность на сервере в течение 7 дней")
                     await channel.send(f"❌ Игрок **{member.name}** был кикнут с сервера за полную неактивность в течение 7 дней.")
                 except discord.Forbidden:
-                    # Если у бота не хватает прав кикнуть админа/модератора, пишем об этом в чат логов
-                    await channel.send(f"⚠️ Не удалось кикнуть **{member.name}** (у бота недостаточно прав/роль бота ниже роли юзера).")
+                    await channel.send(f"⚠️ Не удалось кикнуть **{member.name}** (недостаточно прав).")
+
+    # Фоновое задание автоматической очистки сообщений в каналах
+    @tasks.loop(hours=1)
+    async def auto_purge_loop(self):
+        await self.wait_until_ready()
+        cursor.execute("SELECT channel_id, days_old FROM auto_purge")
+        channels = cursor.fetchall()
+        
+        for ch_id, days in channels:
+            channel = self.get_channel(ch_id)
+            if not channel: continue
+            
+            cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+            try:
+                def check(m): return m.created_at < cutoff and not m.pinned
+                await channel.purge(limit=500, check=check, before=cutoff)
+            except Exception:
+                pass
 
 bot = MyBot()
 
-@bot.command()
-async def установка(ctx):
-    if has_cmd_perms(ctx):
-        await ctx.send("**Добро пожаловать в Сирион Хаб! Нажмите кнопку ниже, чтобы заполнить анкету игрока и получить доступ к serverу:**", view=RegistrationView())
+# ================= СЛЭШ КОМАНДЫ (СИСТЕМА НАСТРОЙКИ ДОСТУПА) =================
+@bot.tree.command(name="установка", description="Установить начальное сообщение с кнопкой анкеты")
+async def установка(ctx: discord.Interaction):
+    if not check_staff_permission(ctx.user):
+        await ctx.response.send_message("❌ У вас нет прав на использование этой команды.", ephemeral=True)
+        return
+    await ctx.response.send_message("Создаю сообщение...", ephemeral=True)
+    await ctx.channel.send("**Добро пожаловать в Сирион Хаб! Нажмите кнопку ниже, чтобы заполнить анкету игрока и получить доступ к серверу:**", view=RegistrationView())
 
+@bot.tree.command(name="очистить", description="Удалить определенное количество сообщений")
+@app_commands.describe(количество="Сколько сообщений нужно стереть")
+async def очистить(ctx: discord.Interaction, количество: int):
+    if not check_staff_permission(ctx.user):
+        await ctx.response.send_message("❌ Доступно только администрации и персоналу бота.", ephemeral=True)
+        return
+    if количество < 1:
+        await ctx.response.send_message("❌ Укажите число больше нуля.", ephemeral=True)
+        return
+        
+    await ctx.response.defer(ephemeral=True)
+    deleted = await ctx.channel.purge(limit=количество)
+    await ctx.followup.send(f"✅ Успешно удалено сообщений: {len(deleted)}.", ephemeral=True)
+
+@bot.tree.command(name="автоочистка", description="Настроить автоматическую очистку старых сообщений в этом канале")
+@app_commands.describe(дней="Удалять сообщения старше этого количества дней (0 для отключения)")
+async def автоочистка(ctx: discord.Interaction, дней: int):
+    if not check_staff_permission(ctx.user):
+        await ctx.response.send_message("❌ Доступно только администрации.", ephemeral=True)
+        return
+        
+    if дней <= 0:
+        cursor.execute("DELETE FROM auto_purge WHERE channel_id = ?", (ctx.channel_id,))
+        conn.commit()
+        await ctx.response.send_message("🛑 Автоочистка для этого канала полностью отключена.", ephemeral=True)
+    else:
+        cursor.execute("INSERT OR REPLACE INTO auto_purge (channel_id, days_old) VALUES (?, ?)", (ctx.channel_id, дней))
+        conn.commit()
+        await ctx.response.send_message(f"⚙️ Включена автоочистка: теперь сообщения старше {дней} дн. будут удаляться раз в час.", ephemeral=True)
+
+@bot.tree.command(name="доступ", description="Управление правами доступа к управлению ботом")
+@app_commands.choices(действие=[
+    app_commands.Choice(name="Добавить доступ", value="add"),
+    app_commands.Choice(name="Удалить доступ", value="remove"),
+    app_commands.Choice(name="Список персонала", value="list")
+])
+@app_commands.describe(роль_или_юзер="Укажите роль или пользователя для настройки прав")
+async def доступ(ctx: discord.Interaction, действие: str, роль_или_юзер: str = None):
+    # Команду настройки доступов могут юзать только Глобальные админы или создатель MY_ID
+    if ctx.user.id != MY_ID and not ctx.user.guild_permissions.administrator:
+        await ctx.response.send_message("❌ Эта системная команда доступна только Главному Администратору.", ephemeral=True)
+        return
+
+    if действие == "list":
+        cursor.execute("SELECT target_id FROM staff_access")
+        rows = cursor.fetchall()
+        if not rows:
+            await ctx.response.send_message("ℹ️ В базе данных нет кастомных доступов. Права имеют только Администрация и Модераторы.", ephemeral=True)
+            return
+        
+        text = "📋 **Персонал с кастомным доступом к боту:**\n"
+        for r in rows:
+            text += f"• ID или Упоминание: <@&{r[0]}> / <@{r[0]}>\n"
+        await ctx.response.send_message(text, ephemeral=True)
+        return
+
+    if not роль_или_юзер:
+        await ctx.response.send_message("❌ Вы забыли указать роль или пользователя в параметре!", ephemeral=True)
+        return
+
+    # Извлекаем чистый ID из упоминания (@роли или @пользователя)
+    cleaned_id = re.sub(r'[<@&!>]', '', роль_или_юзер)
+    if not cleaned_id.isdigit():
+        await ctx.response.send_message("❌ Не удалось распознать корректный ID роли или пользователя.", ephemeral=True)
+        return
+    
+    target_id = int(cleaned_id)
+
+    if действие == "add":
+        cursor.execute("INSERT OR REPLACE INTO staff_access (target_id, type) VALUES (?, 'custom')", (target_id,))
+        conn.commit()
+        await ctx.response.send_message(f"✅ Объект с ID `{target_id}` успешно добавлен в список персонала бота.", ephemeral=True)
+
+    elif действие == "remove":
+        cursor.execute("DELETE FROM staff_access WHERE target_id = ?", (target_id,))
+        conn.commit()
+        await ctx.response.send_message(f"➖ Объект с ID `{target_id}` успешно удален из прав доступа бота.", ephemeral=True)
+
+# ================= ЗАПУСК БОТА =================
 async def main():
     await start_server()
     async with bot: await bot.start(TOKEN)
