@@ -395,36 +395,44 @@ async def _очистить(ctx: discord.Interaction, количество: int)
     deleted = await ctx.channel.purge(limit=количество)
     await ctx.followup.send(f"✅ Успешно и мгновенно удалено сообщений: {len(deleted)}.", ephemeral=True)
 
-@bot.tree.command(name="автоочистка", description="Настроить индивидуальный таймер удаления для каждого нового сообщения")
-@app_commands.choices(тип_времени=[
-    app_commands.Choice(name="Минуты", value="minutes"),
-    app_commands.Choice(name="Часы", value="hours"),
-    app_commands.Choice(name="Дни", value="days"),
-    app_commands.Choice(name="Отключить автоочистку", value="off")
-])
-@app_commands.describe(тип_времени="В чем измерять срок жизни сообщений", значение="Какое время выставить (пропусти, если отключаешь)")
-async def _автоочистка(ctx: discord.Interaction, тип_времени: str, значение: int = None):
+@bot.tree.command(name="очистить", description="Мгновенно удалить пачку сообщений (не старше 2 недель)")
+@app_commands.describe(количество="Сколько сообщений нужно стереть")
+async def _очистить(ctx: discord.Interaction, количество: int):
     if not check_staff_permission(ctx.user):
-        await ctx.response.send_message("❌ У вас нет доступа.", ephemeral=True)
+        await ctx.response.send_message("❌ У вас нет доступа к этой команде.", ephemeral=True)
+        return
+    if количество < 1:
+        await ctx.response.send_message("❌ Укажите число больше нуля.", ephemeral=True)
         return
         
-    if тип_времени == "off":
-        cursor.execute("DELETE FROM auto_purge WHERE channel_id = ?", (ctx.channel_id,))
-        cursor.execute("DELETE FROM tracked_messages WHERE channel_id = ?", (ctx.channel_id,))
-        conn.commit()
-        await ctx.response.send_message("🛑 Автоочистка для этого канала полностью отключена.", ephemeral=True)
-        return
-
-    if значение is None or значение < 1:
-        await ctx.response.send_message("❌ Вы должны указать числовое значение времени больше нуля!", ephemeral=True)
-        return
-
-    cursor.execute("INSERT OR REPLACE INTO auto_purge (channel_id, time_value, time_type) VALUES (?, ?, ?)", 
-                   (ctx.channel_id, значение, тип_времени))
-    conn.commit()
+    await ctx.response.defer(ephemeral=True)
     
-    labels = {"minutes": "мин.", "hours": "ч.", "days": "дн."}
-    await ctx.response.send_message(f"⚙️ Посообщечный таймер включен! Теперь каждому новому сообщению в этом канале будет выдаваться индивидуальный таймер на **{значение} {labels[тип_времени]}** до его удаления.", ephemeral=True)
+    # Две недели назад в формате UTC
+    two_weeks_ago = datetime.now(timezone.utc) - timedelta(days=14)
+    
+    # Проверяем сообщения перед удалением
+    skipped_old = False
+    to_delete = []
+    
+    # Берем историю сообщений (+1, чтобы не считать саму команду, если бы она была текстовой)
+    async for msg in ctx.channel.history(limit=количество):
+        if msg.created_at > two_weeks_ago:
+            to_delete.append(msg)
+        else:
+            skipped_old = True
+
+    if not to_delete:
+        await ctx.followup.send("❌ Нечего удалять. Все найденные сообщения старше 2 недель!", ephemeral=True)
+        return
+
+    # Удаляем всю пачку ОДНИМ запросом (bulk=True)
+    deleted = await ctx.channel.purge(limit=len(to_delete), check=lambda m: m in to_delete, bulk=True)
+    
+    # Отвечаем в зависимости от того, были ли старые сообщения
+    if skipped_old:
+        await ctx.followup.send(f"⚠️ Пачкой удалено сообщений: {len(deleted)}. Остальные сообщения пропущены, так как им больше 2 недель!", ephemeral=True)
+    else:
+        await ctx.followup.send(f"✅ Успешно удалена пачка из {len(deleted)} сообщений.", ephemeral=True)
 
 @bot.tree.command(name="доступ", description="Выдать или забрать полный функционал бота у пользователя/роли (Переключатель)")
 @app_commands.describe(выбор_объекта="Выберите пользователя или роль на сервере")
