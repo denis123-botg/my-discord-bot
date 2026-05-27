@@ -54,6 +54,15 @@ cursor.execute("""
         time_type TEXT
     )
 """)
+
+# НОВАЯ ТАБЛИЦА: Для поштучного отслеживания удаления сообщений
+cursor.execute("""
+    CREATE TABLE IF NOT EXISTS tracked_messages (
+        message_id INTEGER PRIMARY KEY,
+        channel_id INTEGER,
+        delete_at TEXT
+    )
+""")
 conn.commit()
 
 def update_user_activity(user_id, dt=None):
@@ -217,7 +226,6 @@ class MyBot(commands.Bot):
         if not self.guilds: return
         guild = self.guilds[0]
         
-        # Полное обновление дерева команд (убирает старые команды принять/отказать)
         try:
             self.tree.clear_commands(guild=None)
             await self.tree.sync()
@@ -255,7 +263,26 @@ class MyBot(commands.Bot):
                     await m.delete()
                     await m.channel.send(content=m.content, view=AdminReviewView())
             return
+
         update_user_activity(m.author.id)
+
+        # ТАЙМЕРЫ ДЛЯ АВТООЧИСТКИ: Проверяем, включена ли автоочистка для данного канала
+        cursor.execute("SELECT time_value, time_type FROM auto_purge WHERE channel_id = ?", (m.channel.id,))
+        setting = cursor.fetchone()
+        if setting:
+            val, t_type = setting
+            now = datetime.now(timezone.utc)
+            if t_type == "minutes":
+                delete_at = now + timedelta(minutes=val)
+            elif t_type == "hours":
+                delete_at = now + timedelta(hours=val)
+            elif t_type == "days":
+                delete_at = now + timedelta(days=val)
+                
+            # Записываем сообщение в базу данных с индивидуальным временем удаления
+            cursor.execute("INSERT OR REPLACE INTO tracked_messages (message_id, channel_id, delete_at) VALUES (?, ?, ?)",
+                           (m.id, m.channel.id, delete_at.isoformat()))
+            conn.commit()
 
     @tasks.loop(hours=1)
     async def check_activity_loop(self):
@@ -294,32 +321,37 @@ class MyBot(commands.Bot):
                 except discord.Forbidden:
                     await channel.send(f"⚠️ Не удалось кикнуть **{member.name}** (нет прав).")
 
-    # Мгновенная пачечная очистка по заданному времени
-    @tasks.loop(minutes=2)
+    # Переписанный таск: Проверяет посообщечные таймеры каждые 10 секунд для максимальной точности
+    @tasks.loop(seconds=10)
     async def auto_purge_loop(self):
         await self.wait_until_ready()
-        cursor.execute("SELECT channel_id, time_value, time_type FROM auto_purge")
-        channels = cursor.fetchall()
-        
         now = datetime.now(timezone.utc)
         
-        for ch_id, val, t_type in channels:
-            channel = self.get_channel(ch_id)
-            if not channel: continue
-            
-            if t_type == "minutes":
-                cutoff = now - timedelta(minutes=val)
-            else:
-                cutoff = now - timedelta(hours=val)
+        cursor.execute("SELECT message_id, channel_id, delete_at FROM tracked_messages")
+        messages = cursor.fetchall()
+        
+        for msg_id, ch_id, del_at_str in messages:
+            del_at = datetime.fromisoformat(del_at_str)
+            if now >= del_at:
+                # Время сообщения вышло -> удаляем
+                channel = self.get_channel(ch_id)
+                if channel:
+                    try:
+                        msg = await channel.fetch_message(msg_id)
+                        if not msg.pinned:
+                            await msg.delete()
+                    except discord.NotFound:
+                        pass # Сообщение уже удалили вручную
+                    except Exception:
+                        pass
                 
-            try:
-                await channel.purge(limit=500, before=cutoff, check=lambda m: not m.pinned)
-            except Exception: 
-                pass
+                # Очищаем запись из базы данных
+                cursor.execute("DELETE FROM tracked_messages WHERE message_id = ?", (msg_id,))
+                conn.commit()
 
 bot = MyBot()
 
-# ================= ОСТАВШИЕСЯ 4 СЛЭШ-КОМАНДЫ =================
+# ================= ОБНОВЛЕННЫЕ СЛЭШ-КОМАНДЫ =================
 
 @bot.tree.command(name="установка", description="Установить начальное сообщение с кнопкой анкеты")
 async def _установка(ctx: discord.Interaction):
@@ -329,7 +361,7 @@ async def _установка(ctx: discord.Interaction):
     await ctx.response.send_message("Создаю сообщение...", ephemeral=True)
     await ctx.channel.send("**Добро пожаловать в Сирион Хаб! Нажмите кнопку ниже, чтобы заполнить анкету игрока и получить доступ к серверу:**", view=RegistrationView())
 
-@bot.tree.command(name="очистить", description="Удалить определенное количество сообщений")
+@bot.tree.command(name="очистить", description="Мгновенно удалить определенное количество сообщений")
 @app_commands.describe(количество="Сколько сообщений нужно стереть")
 async def _очистить(ctx: discord.Interaction, количество: int):
     if not check_staff_permission(ctx.user):
@@ -338,14 +370,17 @@ async def _очистить(ctx: discord.Interaction, количество: int)
     if количество < 1:
         await ctx.response.send_message("❌ Укажите число больше нуля.", ephemeral=True)
         return
+        
     await ctx.response.defer(ephemeral=True)
+    # Мгновенная пачечная очистка без искусственных задержек
     deleted = await ctx.channel.purge(limit=количество)
-    await ctx.followup.send(f"✅ Успешно удалено сообщений: {len(deleted)}.", ephemeral=True)
+    await ctx.followup.send(f"✅ Успешно и мгновенно удалено сообщений: {len(deleted)}.", ephemeral=True)
 
-@bot.tree.command(name="автоочистка", description="Настроить автоматическую очистку старых сообщений в этом канале")
+@bot.tree.command(name="автоочистка", description="Настроить индивидуальный таймер удаления для каждого нового сообщения")
 @app_commands.choices(тип_времени=[
     app_commands.Choice(name="Минуты", value="minutes"),
     app_commands.Choice(name="Часы", value="hours"),
+    app_commands.Choice(name="Дни", value="days"),
     app_commands.Choice(name="Отключить автоочистку", value="off")
 ])
 @app_commands.describe(тип_времени="В чем измерять срок жизни сообщений", значение="Какое время выставить (пропусти, если отключаешь)")
@@ -356,6 +391,8 @@ async def _автоочистка(ctx: discord.Interaction, тип_времен�
         
     if тип_времени == "off":
         cursor.execute("DELETE FROM auto_purge WHERE channel_id = ?", (ctx.channel_id,))
+        # Заодно чистим очередь сообщений этого канала из трекера
+        cursor.execute("DELETE FROM tracked_messages WHERE channel_id = ?", (ctx.channel_id,))
         conn.commit()
         await ctx.response.send_message("🛑 Автоочистка для этого канала полностью отключена.", ephemeral=True)
         return
@@ -368,22 +405,19 @@ async def _автоочистка(ctx: discord.Interaction, тип_времен�
                    (ctx.channel_id, значение, тип_времени))
     conn.commit()
     
-    label = "мин." if тип_времени == "minutes" else "ч."
-    await ctx.response.send_message(f"⚙️ Срок успешно изменен! Теперь сообщения старше **{значение} {label}** будут мгновенно стираться пачкой.", ephemeral=True)
+    labels = {"minutes": "мин.", "hours": "ч.", "days": "дн."}
+    await ctx.response.send_message(f"⚙️ Посообщечный таймер включен! Теперь каждому новому сообщению в этом канале будет выдаваться индивидуальный таймер на **{значение} {labels[тип_времени]}** до его удаления.", ephemeral=True)
 
-@bot.tree.command(name="доступ", description="Управление правами доступа к командам бота")
-@app_commands.choices(действие=[
-    app_commands.Choice(name="Добавить доступ", value="add"),
-    app_commands.Choice(name="Забрать доступ", value="remove"),
-    app_commands.Choice(name="Список персонала", value="list")
-])
+@bot.tree.command(name="доступ", description="Выдать или забрать полный функционал бота у пользователя/роли (Переключатель)")
 @app_commands.describe(выбор_объекта="Выберите пользователя или роль на сервере")
-async def _доступ(ctx: discord.Interaction, действие: str, выбор_объекта: Union[discord.Member, discord.Role] = None):
+async def _доступ(ctx: discord.Interaction, выбор_объекта: Union[discord.Member, discord.Role] = None):
+    # Доступ к настройке прав есть только у создателя бота (MY_ID) и Администраторов сервера
     if ctx.user.id != MY_ID and not ctx.user.guild_permissions.administrator:
         await ctx.response.send_message("❌ Настройка доступов доступна только Главному Администратору.", ephemeral=True)
         return
 
-    if действие == "list":
+    # Если объект не передан, просто выводим текущий список персонала
+    if not выбор_объекта:
         cursor.execute("SELECT target_id FROM staff_access")
         rows = cursor.fetchall()
         if not rows:
@@ -394,20 +428,22 @@ async def _доступ(ctx: discord.Interaction, действие: str, выб�
         await ctx.response.send_message(text, ephemeral=True)
         return
 
-    if not выбор_объекта:
-        await ctx.response.send_message("❌ Вы забыли выбрать пользователя или роль в параметрах!", ephemeral=True)
-        return
-
     target_id = выбор_объекта.id
 
-    if действие == "add":
-        cursor.execute("INSERT OR REPLACE INTO staff_access (target_id, type) VALUES (?, 'custom')", (target_id,))
-        conn.commit()
-        await ctx.response.send_message(f"✅ Доступ для {выбор_объекта.mention} успешно выдан.", ephemeral=True)
-    elif действие == "remove":
+    # Проверяем, есть ли уже этот ID в базе
+    cursor.execute("SELECT target_id FROM staff_access WHERE target_id = ?", (target_id,))
+    exists = cursor.fetchone()
+
+    if exists:
+        # Если есть — удаляем (забираем доступ)
         cursor.execute("DELETE FROM staff_access WHERE target_id = ?", (target_id,))
         conn.commit()
-        await ctx.response.send_message(f"➖ Доступ для {выбор_объекта.mention} успешно аннулирован.", ephemeral=True)
+        await ctx.response.send_message(f"➖ Доступ для {выбор_объекта.mention} успешно **аннулирован**.", ephemeral=True)
+    else:
+        # Если нет — добавляем (выдаем полный доступ)
+        cursor.execute("INSERT INTO staff_access (target_id, type) VALUES (?, 'custom')", (target_id,))
+        conn.commit()
+        await ctx.response.send_message(f"✅ Полный функционал бота для {выбор_объекта.mention} успешно **выдан**.", ephemeral=True)
 
 # ================= ЗАПУСК БОТА =================
 async def main():
