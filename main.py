@@ -55,7 +55,6 @@ cursor.execute("""
     )
 """)
 
-# НОВАЯ ТАБЛИЦА: Для поштучного отслеживания удаления сообщений
 cursor.execute("""
     CREATE TABLE IF NOT EXISTS tracked_messages (
         message_id INTEGER PRIMARY KEY,
@@ -222,18 +221,14 @@ class MyBot(commands.Bot):
         self.add_view(AdminReviewView())
         
     async def on_ready(self):
-            async def on_ready(self):
         print(f"Бот запущен под именем {self.user}")
         if not self.guilds: 
             return
         guild = self.guilds[0]
         
         try:
-            # Чистим старый глобальный кэш
             self.tree.clear_commands(guild=None)
-            # Копируем команды на твой сервер для мгновенной работы
             self.tree.copy_global_to(guild=guild)
-            # Синхронизируем именно с этим сервером
             await self.tree.sync(guild=guild)
             print("Слэш-команды успешно прописаны и обновлены в Discord!")
         except Exception as e:
@@ -261,7 +256,6 @@ class MyBot(commands.Bot):
         if not self.auto_purge_loop.is_running(): 
             self.auto_purge_loop.start()
 
-
     async def on_member_join(self, m):
         r = m.guild.get_role(ROLE_CANDIDATE)
         if r: await m.add_roles(r)
@@ -277,7 +271,6 @@ class MyBot(commands.Bot):
 
         update_user_activity(m.author.id)
 
-        # ТАЙМЕРЫ ДЛЯ АВТООЧИСТКИ: Проверяем, включена ли автоочистка для данного канала
         cursor.execute("SELECT time_value, time_type FROM auto_purge WHERE channel_id = ?", (m.channel.id,))
         setting = cursor.fetchone()
         if setting:
@@ -290,7 +283,6 @@ class MyBot(commands.Bot):
             elif t_type == "days":
                 delete_at = now + timedelta(days=val)
                 
-            # Записываем сообщение в базу данных с индивидуальным временем удаления
             cursor.execute("INSERT OR REPLACE INTO tracked_messages (message_id, channel_id, delete_at) VALUES (?, ?, ?)",
                            (m.id, m.channel.id, delete_at.isoformat()))
             conn.commit()
@@ -332,7 +324,6 @@ class MyBot(commands.Bot):
                 except discord.Forbidden:
                     await channel.send(f"⚠️ Не удалось кикнуть **{member.name}** (нет прав).")
 
-    # Переписанный таск: Проверяет посообщечные таймеры каждые 10 секунд для максимальной точности
     @tasks.loop(seconds=10)
     async def auto_purge_loop(self):
         await self.wait_until_ready()
@@ -344,7 +335,6 @@ class MyBot(commands.Bot):
         for msg_id, ch_id, del_at_str in messages:
             del_at = datetime.fromisoformat(del_at_str)
             if now >= del_at:
-                # Время сообщения вышло -> удаляем
                 channel = self.get_channel(ch_id)
                 if channel:
                     try:
@@ -352,17 +342,16 @@ class MyBot(commands.Bot):
                         if not msg.pinned:
                             await msg.delete()
                     except discord.NotFound:
-                        pass # Сообщение уже удалили вручную
+                        pass
                     except Exception:
                         pass
                 
-                # Очищаем запись из базы данных
                 cursor.execute("DELETE FROM tracked_messages WHERE message_id = ?", (msg_id,))
                 conn.commit()
 
 bot = MyBot()
 
-# ================= ОБНОВЛЕННЫЕ СЛЭШ-КОМАНДЫ =================
+# ================= СЛЭШ-КОМАНДЫ =================
 
 @bot.tree.command(name="установка", description="Установить начальное сообщение с кнопкой анкеты")
 async def _установка(ctx: discord.Interaction):
@@ -383,7 +372,6 @@ async def _очистить(ctx: discord.Interaction, количество: int)
         return
         
     await ctx.response.defer(ephemeral=True)
-    # Мгновенная пачечная очистка без искусственных задержек
     deleted = await ctx.channel.purge(limit=количество)
     await ctx.followup.send(f"✅ Успешно и мгновенно удалено сообщений: {len(deleted)}.", ephemeral=True)
 
@@ -402,7 +390,6 @@ async def _автоочистка(ctx: discord.Interaction, тип_времен�
         
     if тип_времени == "off":
         cursor.execute("DELETE FROM auto_purge WHERE channel_id = ?", (ctx.channel_id,))
-        # Заодно чистим очередь сообщений этого канала из трекера
         cursor.execute("DELETE FROM tracked_messages WHERE channel_id = ?", (ctx.channel_id,))
         conn.commit()
         await ctx.response.send_message("🛑 Автоочистка для этого канала полностью отключена.", ephemeral=True)
@@ -417,17 +404,15 @@ async def _автоочистка(ctx: discord.Interaction, тип_времен�
     conn.commit()
     
     labels = {"minutes": "мин.", "hours": "ч.", "days": "дн."}
-    await ctx.response.send_message(f"⚙️ Посообщечный таймер включен! Теперь каждому новому сообщению в этом канале будет выдаваться индивидуальный таймер на **{значение} {labels[тип_времени]}** до его удаления.", ephemeral=True)
+    await ctx.response.send_message(f"⚙️ Посообщечный таймер включен! Теперь каждому новому сообщению в этом канале будет выдаваться индивидуальный таймер на **{значение} {labels[tipo_vremeni]}** до его удаления.", ephemeral=True)
 
 @bot.tree.command(name="доступ", description="Выдать или забрать полный функционал бота у пользователя/роли (Переключатель)")
 @app_commands.describe(выбор_объекта="Выберите пользователя или роль на сервере")
 async def _доступ(ctx: discord.Interaction, выбор_объекта: Union[discord.Member, discord.Role] = None):
-    # Доступ к настройке прав есть только у создателя бота (MY_ID) и Администраторов сервера
     if ctx.user.id != MY_ID and not ctx.user.guild_permissions.administrator:
         await ctx.response.send_message("❌ Настройка доступов доступна только Главному Администратору.", ephemeral=True)
         return
 
-    # Если объект не передан, просто выводим текущий список персонала
     if not выбор_объекта:
         cursor.execute("SELECT target_id FROM staff_access")
         rows = cursor.fetchall()
@@ -441,17 +426,14 @@ async def _доступ(ctx: discord.Interaction, выбор_объекта: Uni
 
     target_id = выбор_объекта.id
 
-    # Проверяем, есть ли уже этот ID в базе
     cursor.execute("SELECT target_id FROM staff_access WHERE target_id = ?", (target_id,))
     exists = cursor.fetchone()
 
     if exists:
-        # Если есть — удаляем (забираем доступ)
         cursor.execute("DELETE FROM staff_access WHERE target_id = ?", (target_id,))
         conn.commit()
         await ctx.response.send_message(f"➖ Доступ для {выбор_объекта.mention} успешно **аннулирован**.", ephemeral=True)
     else:
-        # Если нет — добавляем (выдаем полный доступ)
         cursor.execute("INSERT INTO staff_access (target_id, type) VALUES (?, 'custom')", (target_id,))
         conn.commit()
         await ctx.response.send_message(f"✅ Полный функционал бота для {выбор_объекта.mention} успешно **выдан**.", ephemeral=True)
