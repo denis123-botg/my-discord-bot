@@ -62,6 +62,14 @@ cursor.execute("""
         delete_at TEXT
     )
 """)
+
+cursor.execute("""
+    CREATE TABLE IF NOT EXISTS welcome_settings (
+        guild_id INTEGER PRIMARY KEY,
+        channel_id INTEGER,
+        welcome_text TEXT
+    )
+""")
 conn.commit()
 
 def update_user_activity(user_id, dt=None):
@@ -158,7 +166,6 @@ class DenyChatView(View):
             await interaction.channel.delete()
         else:
             await interaction.response.send_message("❌ У вас нет прав на удаление этого канала.", ephemeral=True)
-
 class AdminReviewView(View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -227,12 +234,12 @@ class MyBot(commands.Bot):
         guild = self.guilds[0]
         
         try:
-            self.tree.clear_commands(guild=None)
+            self.tree.clear_commands(guild=guild)
             self.tree.copy_global_to(guild=guild)
             await self.tree.sync(guild=guild)
-            print("Слэш-команды успешно прописаны и обновлены в Discord!")
+            print(f"✅ Слэш-команды успешно прописаны на сервере: {guild.name}!")
         except Exception as e:
-            print(f"Ошибка синхронизации слэш-команд: {e}")
+            print(f"❌ Ошибка синхронизации слэш-команд: {e}")
             
         player_role = guild.get_role(ROLE_PLAYER)
         if not player_role: 
@@ -258,7 +265,20 @@ class MyBot(commands.Bot):
 
     async def on_member_join(self, m):
         r = m.guild.get_role(ROLE_CANDIDATE)
-        if r: await m.add_roles(r)
+        if r: 
+            await m.add_roles(r)
+            
+        cursor.execute("SELECT channel_id, welcome_text FROM welcome_settings WHERE guild_id = ?", (m.guild.id,))
+        setting = cursor.fetchone()
+        if setting:
+            ch_id, text = setting
+            channel = m.guild.get_channel(ch_id)
+            if channel:
+                formatted_text = text.replace("{user}", m.mention)
+                try:
+                    await channel.send(formatted_text)
+                except Exception:
+                    pass
         
     async def on_message(self, m):
         if m.author.bot:
@@ -404,7 +424,7 @@ async def _автоочистка(ctx: discord.Interaction, тип_времен�
     conn.commit()
     
     labels = {"minutes": "мин.", "hours": "ч.", "days": "дн."}
-    await ctx.response.send_message(f"⚙️ Посообщечный таймер включен! Теперь каждому новому сообщению в этом канале будет выдаваться индивидуальный таймер на **{значение} {labels[tipo_vremeni]}** до его удаления.", ephemeral=True)
+    await ctx.response.send_message(f"⚙️ Посообщечный таймер включен! Теперь каждому новому сообщению в этом канале будет выдаваться индивидуальный таймер на **{значение} {labels[тип_времени]}** до его удаления.", ephemeral=True)
 
 @bot.tree.command(name="доступ", description="Выдать или забрать полный функционал бота у пользователя/роли (Переключатель)")
 @app_commands.describe(выбор_объекта="Выберите пользователя или роль на сервере")
@@ -437,6 +457,19 @@ async def _доступ(ctx: discord.Interaction, выбор_объекта: Uni
         cursor.execute("INSERT INTO staff_access (target_id, type) VALUES (?, 'custom')", (target_id,))
         conn.commit()
         await ctx.response.send_message(f"✅ Полный функционал бота для {выбор_объекта.mention} успешно **выдан**.", ephemeral=True)
+
+@bot.tree.command(name="приветствие", description="Настроить автоматическое приветствие для новых участников")
+@app_commands.describe(канал="Канал, куда бот будет отправлять приветствие", текст="Текст приветствия. Используй {user} для упоминания игрока")
+async def _приветствие(ctx: discord.Interaction, канал: discord.TextChannel, текст: str):
+    if not check_staff_permission(ctx.user):
+        await ctx.response.send_message("❌ У вас нет прав на использование этой команды.", ephemeral=True)
+        return
+        
+    cursor.execute("INSERT OR REPLACE INTO welcome_settings (guild_id, channel_id, welcome_text) VALUES (?, ?, ?)",
+                   (ctx.guild_id, канал.id, текст))
+    conn.commit()
+    
+    await ctx.response.send_message(f"✅ Приветствие успешно настроено!\n📺 Канал: {канал.mention}\n📝 Текст: {текст}", ephemeral=True)
 
 # ================= ЗАПУСК БОТА =================
 async def main():
