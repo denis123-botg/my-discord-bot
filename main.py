@@ -222,25 +222,33 @@ class MyBot(commands.Bot):
         self.add_view(AdminReviewView())
         
     async def on_ready(self):
+            async def on_ready(self):
         print(f"Бот запущен под именем {self.user}")
-        if not self.guilds: return
+        if not self.guilds: 
+            return
         guild = self.guilds[0]
         
         try:
+            # Чистим старый глобальный кэш
             self.tree.clear_commands(guild=None)
-            await self.tree.sync()
+            # Копируем команды на твой сервер для мгновенной работы
+            self.tree.copy_global_to(guild=guild)
+            # Синхронизируем именно с этим сервером
+            await self.tree.sync(guild=guild)
             print("Слэш-команды успешно прописаны и обновлены в Discord!")
         except Exception as e:
             print(f"Ошибка синхронизации слэш-команд: {e}")
             
         player_role = guild.get_role(ROLE_PLAYER)
-        if not player_role: return
+        if not player_role: 
+            return
 
         print("Запуск БЕЗОПАСНОЙ очистки и синхронизации...")
         current_time = datetime.now(timezone.utc)
         
         for member in guild.members:
-            if member.bot: continue
+            if member.bot: 
+                continue
             if player_role in member.roles:
                 cursor.execute("SELECT user_id FROM activity WHERE user_id = ?", (member.id,))
                 if cursor.fetchone() is None:
@@ -248,8 +256,11 @@ class MyBot(commands.Bot):
                 
         print("База данных успешно сброшена на безопасный режим.")
         
-        if not self.check_activity_loop.is_running(): self.check_activity_loop.start()
-        if not self.auto_purge_loop.is_running(): self.auto_purge_loop.start()
+        if not self.check_activity_loop.is_running(): 
+            self.check_activity_loop.start()
+        if not self.auto_purge_loop.is_running(): 
+            self.auto_purge_loop.start()
+
 
     async def on_member_join(self, m):
         r = m.guild.get_role(ROLE_CANDIDATE)
