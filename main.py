@@ -55,22 +55,24 @@ cursor.execute("""
     )
 """)
 
+# Таблица для сохранения режима анкеты (1 - включен, 0 - выключен)
 cursor.execute("""
-    CREATE TABLE IF NOT EXISTS tracked_messages (
-        message_id INTEGER PRIMARY KEY,
-        channel_id INTEGER,
-        delete_at TEXT
+    CREATE TABLE IF NOT EXISTS bot_settings (
+        key TEXT PRIMARY KEY,
+        value INTEGER
     )
 """)
-
-cursor.execute("""
-    CREATE TABLE IF NOT EXISTS welcome_settings (
-        guild_id INTEGER PRIMARY KEY,
-        channel_id INTEGER,
-        welcome_text TEXT
-    )
-""")
+cursor.execute("INSERT OR IGNORE INTO bot_settings (key, value) VALUES ('survey_mode', 1)")
 conn.commit()
+
+def get_survey_mode() -> bool:
+    cursor.execute("SELECT value FROM bot_settings WHERE key = 'survey_mode'")
+    row = cursor.fetchone()
+    return bool(row[0]) if row else True
+
+def set_survey_mode(enabled: bool):
+    cursor.execute("INSERT OR REPLACE INTO bot_settings (key, value) VALUES ('survey_mode', ?)", (1 if enabled else 0,))
+    conn.commit()
 
 def update_user_activity(user_id, dt=None):
     if dt is None:
@@ -166,6 +168,7 @@ class DenyChatView(View):
             await interaction.channel.delete()
         else:
             await interaction.response.send_message("❌ У вас нет прав на удаление этого канала.", ephemeral=True)
+
 class AdminReviewView(View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -216,7 +219,6 @@ class RegistrationView(View):
         v = View()
         v.add_item(discord.ui.Button(label="Открыть анкету", url=url))
         await itn.response.send_message("Твоя персональная ссылка на анкету:", view=v, ephemeral=True)
-
 # ================= BOT CLASS =================
 class MyBot(commands.Bot):
     def __init__(self):
@@ -229,28 +231,24 @@ class MyBot(commands.Bot):
         
     async def on_ready(self):
         print(f"Бот запущен под именем {self.user}")
-        if not self.guilds: 
-            return
+        if not self.guilds: return
         guild = self.guilds[0]
         
         try:
-            self.tree.clear_commands(guild=guild)
-            self.tree.copy_global_to(guild=guild)
-            await self.tree.sync(guild=guild)
-            print(f"✅ Слэш-команды успешно прописаны на сервере: {guild.name}!")
+            self.tree.clear_commands(guild=None)
+            await self.tree.sync()
+            print("Слэш-команды успешно прописаны и обновлены в Discord!")
         except Exception as e:
-            print(f"❌ Ошибка синхронизации слэш-команд: {e}")
+            print(f"Ошибка синхронизации слэш-команд: {e}")
             
         player_role = guild.get_role(ROLE_PLAYER)
-        if not player_role: 
-            return
+        if not player_role: return
 
         print("Запуск БЕЗОПАСНОЙ очистки и синхронизации...")
         current_time = datetime.now(timezone.utc)
         
         for member in guild.members:
-            if member.bot: 
-                continue
+            if member.bot: continue
             if player_role in member.roles:
                 cursor.execute("SELECT user_id FROM activity WHERE user_id = ?", (member.id,))
                 if cursor.fetchone() is None:
@@ -258,27 +256,24 @@ class MyBot(commands.Bot):
                 
         print("База данных успешно сброшена на безопасный режим.")
         
-        if not self.check_activity_loop.is_running(): 
-            self.check_activity_loop.start()
-        if not self.auto_purge_loop.is_running(): 
-            self.auto_purge_loop.start()
+        if not self.check_activity_loop.is_running(): self.check_activity_loop.start()
+        if not self.auto_purge_loop.is_running(): self.auto_purge_loop.start()
 
+    # ИЗМЕНЕННАЯ ЛОГИКА ВХОДА С УЧЕТОМ РЕЖИМА АНКЕТЫ
     async def on_member_join(self, m):
-        r = m.guild.get_role(ROLE_CANDIDATE)
-        if r: 
-            await m.add_roles(r)
-            
-        cursor.execute("SELECT channel_id, welcome_text FROM welcome_settings WHERE guild_id = ?", (m.guild.id,))
-        setting = cursor.fetchone()
-        if setting:
-            ch_id, text = setting
-            channel = m.guild.get_channel(ch_id)
-            if channel:
-                formatted_text = text.replace("{user}", m.mention)
-                try:
-                    await channel.send(formatted_text)
-                except Exception:
-                    pass
+        if get_survey_mode():
+            # Режим анкет включен: выдаем роль Кандидата
+            r = m.guild.get_role(ROLE_CANDIDATE)
+            if r: await m.add_roles(r)
+        else:
+            # Режим анкет выключен: выдаем сразу Игрока и Зарегистрированного
+            r_play = m.guild.get_role(ROLE_PLAYER)
+            r_reg = m.guild.get_role(ROLE_REGISTERED)
+            roles_to_add = [r for r in [r_play, r_reg] if r]
+            if roles_to_add: 
+                await m.add_roles(*roles_to_add)
+            # Заносим сразу в БД активности, так как он стал полноценным игроком
+            update_user_activity(m.id)
         
     async def on_message(self, m):
         if m.author.bot:
@@ -288,24 +283,7 @@ class MyBot(commands.Bot):
                     await m.delete()
                     await m.channel.send(content=m.content, view=AdminReviewView())
             return
-
         update_user_activity(m.author.id)
-
-        cursor.execute("SELECT time_value, time_type FROM auto_purge WHERE channel_id = ?", (m.channel.id,))
-        setting = cursor.fetchone()
-        if setting:
-            val, t_type = setting
-            now = datetime.now(timezone.utc)
-            if t_type == "minutes":
-                delete_at = now + timedelta(minutes=val)
-            elif t_type == "hours":
-                delete_at = now + timedelta(hours=val)
-            elif t_type == "days":
-                delete_at = now + timedelta(days=val)
-                
-            cursor.execute("INSERT OR REPLACE INTO tracked_messages (message_id, channel_id, delete_at) VALUES (?, ?, ?)",
-                           (m.id, m.channel.id, delete_at.isoformat()))
-            conn.commit()
 
     @tasks.loop(hours=1)
     async def check_activity_loop(self):
@@ -344,44 +322,57 @@ class MyBot(commands.Bot):
                 except discord.Forbidden:
                     await channel.send(f"⚠️ Не удалось кикнуть **{member.name}** (нет прав).")
 
-    @tasks.loop(seconds=10)
+    @tasks.loop(minutes=2)
     async def auto_purge_loop(self):
         await self.wait_until_ready()
+        cursor.execute("SELECT channel_id, time_value, time_type FROM auto_purge")
+        channels = cursor.fetchall()
+        
         now = datetime.now(timezone.utc)
         
-        cursor.execute("SELECT message_id, channel_id, delete_at FROM tracked_messages")
-        messages = cursor.fetchall()
-        
-        for msg_id, ch_id, del_at_str in messages:
-            del_at = datetime.fromisoformat(del_at_str)
-            if now >= del_at:
-                channel = self.get_channel(ch_id)
-                if channel:
-                    try:
-                        msg = await channel.fetch_message(msg_id)
-                        if not msg.pinned:
-                            await msg.delete()
-                    except discord.NotFound:
-                        pass
-                    except Exception:
-                        pass
+        for ch_id, val, t_type in channels:
+            channel = self.get_channel(ch_id)
+            if not channel: continue
+            
+            if t_type == "minutes":
+                cutoff = now - timedelta(minutes=val)
+            else:
+                cutoff = now - timedelta(hours=val)
                 
-                cursor.execute("DELETE FROM tracked_messages WHERE message_id = ?", (msg_id,))
-                conn.commit()
+            try:
+                await channel.purge(limit=500, before=cutoff, check=lambda m: not m.pinned)
+            except Exception: 
+                pass
 
 bot = MyBot()
 
-# ================= СЛЭШ-КОМАНДЫ =================
+# ================= ОБНОВЛЕННЫЕ СЛЭШ-КОМАНДЫ =================
 
-@bot.tree.command(name="установка", description="Установить начальное сообщение с кнопкой анкеты")
-async def _установка(ctx: discord.Interaction):
+@bot.tree.command(name="установка_анкеты", description="Включить стандартный режим анкет для новых участников")
+async def _установка_анкеты(ctx: discord.Interaction):
+    if not check_staff_permission(ctx.user):
+        await ctx.response.send_message("❌ У вас нет прав на использование этой команды.", ephemeral=True)
+        return
+    set_survey_mode(True)
+    await ctx.response.send_message("✅ **Режим анкет успешно включен!** Теперь новые участники будут получать роль <@&1259813357763170394>.", ephemeral=True)
+
+@bot.tree.command(name="убрать_анкету", description="Выключить режим анкет (новые участники сразу получают роли Игрока и Зарегистрированного)")
+async def _убрать_анкету(ctx: discord.Interaction):
+    if not check_staff_permission(ctx.user):
+        await ctx.response.send_message("❌ У вас нет прав на использование этой команды.", ephemeral=True)
+        return
+    set_survey_mode(False)
+    await ctx.response.send_message("🛑 **Режим анкет выключен!** Теперь новые участники сразу будут получать роли <@&1506372814477988002> и <@&1259828977942528111>.", ephemeral=True)
+
+@bot.tree.command(name="сообщение_анкеты", description="Отправить в текущий канал сообщение с кнопкой для подачи анкеты")
+async def _сообщение_анкеты(ctx: discord.Interaction):
     if not check_staff_permission(ctx.user):
         await ctx.response.send_message("❌ У вас нет прав на использование этой команды.", ephemeral=True)
         return
     await ctx.response.send_message("Создаю сообщение...", ephemeral=True)
     await ctx.channel.send("**Добро пожаловать в Сирион Хаб! Нажмите кнопку ниже, чтобы заполнить анкету игрока и получить доступ к серверу:**", view=RegistrationView())
 
-@bot.tree.command(name="очистить", description="Мгновенно удалить определенное количество сообщений")
+@bot.tree.command(name="очистить", description="Удалить определенное количество сообщений")
 @app_commands.describe(количество="Сколько сообщений нужно стереть")
 async def _очистить(ctx: discord.Interaction, количество: int):
     if not check_staff_permission(ctx.user):
@@ -390,58 +381,52 @@ async def _очистить(ctx: discord.Interaction, количество: int)
     if количество < 1:
         await ctx.response.send_message("❌ Укажите число больше нуля.", ephemeral=True)
         return
-        
     await ctx.response.defer(ephemeral=True)
     deleted = await ctx.channel.purge(limit=количество)
-    await ctx.followup.send(f"✅ Успешно и мгновенно удалено сообщений: {len(deleted)}.", ephemeral=True)
+    await ctx.followup.send(f"✅ Успешно удалено сообщений: {len(deleted)}.", ephemeral=True)
 
-@bot.tree.command(name="очистить", description="Мгновенно удалить пачку сообщений (не старше 2 недель)")
-@app_commands.describe(количество="Сколько сообщений нужно стереть")
-async def _очистить(ctx: discord.Interaction, количество: int):
+@bot.tree.command(name="автоочистка", description="Настроить автоматическую очистку старых сообщений в этом канале")
+@app_commands.choices(тип_времени=[
+    app_commands.Choice(name="Минуты", value="minutes"),
+    app_commands.Choice(name="Часы", value="hours"),
+    app_commands.Choice(name="Отключить автоочистку", value="off")
+])
+@app_commands.describe(тип_времени="В чем измерять срок жизни сообщений", значение="Какое время выставить (пропусти, если отключаешь)")
+async def _автоочистка(ctx: discord.Interaction, тип_времени: str, значение: int = None):
     if not check_staff_permission(ctx.user):
-        await ctx.response.send_message("❌ У вас нет доступа к этой команде.", ephemeral=True)
-        return
-    if количество < 1:
-        await ctx.response.send_message("❌ Укажите число больше нуля.", ephemeral=True)
+        await ctx.response.send_message("❌ У вас нет доступа.", ephemeral=True)
         return
         
-    await ctx.response.defer(ephemeral=True)
-    
-    # Две недели назад в формате UTC
-    two_weeks_ago = datetime.now(timezone.utc) - timedelta(days=14)
-    
-    # Проверяем сообщения перед удалением
-    skipped_old = False
-    to_delete = []
-    
-    # Берем историю сообщений (+1, чтобы не считать саму команду, если бы она была текстовой)
-    async for msg in ctx.channel.history(limit=количество):
-        if msg.created_at > two_weeks_ago:
-            to_delete.append(msg)
-        else:
-            skipped_old = True
-
-    if not to_delete:
-        await ctx.followup.send("❌ Нечего удалять. Все найденные сообщения старше 2 недель!", ephemeral=True)
+    if тип_времени == "off":
+        cursor.execute("DELETE FROM auto_purge WHERE channel_id = ?", (ctx.channel_id,))
+        conn.commit()
+        await ctx.response.send_message("🛑 Автоочистка для этого канала полностью отключена.", ephemeral=True)
         return
 
-    # Удаляем всю пачку ОДНИМ запросом (bulk=True)
-    deleted = await ctx.channel.purge(limit=len(to_delete), check=lambda m: m in to_delete, bulk=True)
-    
-    # Отвечаем в зависимости от того, были ли старые сообщения
-    if skipped_old:
-        await ctx.followup.send(f"⚠️ Пачкой удалено сообщений: {len(deleted)}. Остальные сообщения пропущены, так как им больше 2 недель!", ephemeral=True)
-    else:
-        await ctx.followup.send(f"✅ Успешно удалена пачка из {len(deleted)} сообщений.", ephemeral=True)
+    if значение is None or значение < 1:
+        await ctx.response.send_message("❌ Вы должны указать числовое значение времени больше нуля!", ephemeral=True)
+        return
 
-@bot.tree.command(name="доступ", description="Выдать или забрать полный функционал бота у пользователя/роли (Переключатель)")
+    cursor.execute("INSERT OR REPLACE INTO auto_purge (channel_id, time_value, time_type) VALUES (?, ?, ?)", 
+                   (ctx.channel_id, значение, тип_времени))
+    conn.commit()
+    
+    label = "мин." if тип_времени == "minutes" else "ч."
+    await ctx.response.send_message(f"⚙️ Срок успешно изменен! Теперь сообщения старше **{значение} {label}** будут мгновенно стираться пачкой.", ephemeral=True)
+
+@bot.tree.command(name="доступ", description="Управление правами доступа к командам бота")
+@app_commands.choices(действие=[
+    app_commands.Choice(name="Добавить доступ", value="add"),
+    app_commands.Choice(name="Забрать доступ", value="remove"),
+    app_commands.Choice(name="Список персонала", value="list")
+])
 @app_commands.describe(выбор_объекта="Выберите пользователя или роль на сервере")
-async def _доступ(ctx: discord.Interaction, выбор_объекта: Union[discord.Member, discord.Role] = None):
+async def _доступ(ctx: discord.Interaction, действие: str, выбор_объекта: Union[discord.Member, discord.Role] = None):
     if ctx.user.id != MY_ID and not ctx.user.guild_permissions.administrator:
         await ctx.response.send_message("❌ Настройка доступов доступна только Главному Администратору.", ephemeral=True)
         return
 
-    if not выбор_объекта:
+    if действие == "list":
         cursor.execute("SELECT target_id FROM staff_access")
         rows = cursor.fetchall()
         if not rows:
@@ -452,32 +437,20 @@ async def _доступ(ctx: discord.Interaction, выбор_объекта: Uni
         await ctx.response.send_message(text, ephemeral=True)
         return
 
+    if not выбор_объекта:
+        await ctx.response.send_message("❌ Вы забыли выбрать пользователя или роль в параметрах!", ephemeral=True)
+        return
+
     target_id = выбор_объекта.id
 
-    cursor.execute("SELECT target_id FROM staff_access WHERE target_id = ?", (target_id,))
-    exists = cursor.fetchone()
-
-    if exists:
+    if действие == "add":
+        cursor.execute("INSERT OR REPLACE INTO staff_access (target_id, type) VALUES (?, 'custom')", (target_id,))
+        conn.commit()
+        await ctx.response.send_message(f"✅ Доступ для {выбор_объекта.mention} успешно выдан.", ephemeral=True)
+    elif действие == "remove":
         cursor.execute("DELETE FROM staff_access WHERE target_id = ?", (target_id,))
         conn.commit()
-        await ctx.response.send_message(f"➖ Доступ для {выбор_объекта.mention} успешно **аннулирован**.", ephemeral=True)
-    else:
-        cursor.execute("INSERT INTO staff_access (target_id, type) VALUES (?, 'custom')", (target_id,))
-        conn.commit()
-        await ctx.response.send_message(f"✅ Полный функционал бота для {выбор_объекта.mention} успешно **выдан**.", ephemeral=True)
-
-@bot.tree.command(name="приветствие", description="Настроить автоматическое приветствие для новых участников")
-@app_commands.describe(канал="Канал, куда бот будет отправлять приветствие", текст="Текст приветствия. Используй {user} для упоминания игрока")
-async def _приветствие(ctx: discord.Interaction, канал: discord.TextChannel, текст: str):
-    if not check_staff_permission(ctx.user):
-        await ctx.response.send_message("❌ У вас нет прав на использование этой команды.", ephemeral=True)
-        return
-        
-    cursor.execute("INSERT OR REPLACE INTO welcome_settings (guild_id, channel_id, welcome_text) VALUES (?, ?, ?)",
-                   (ctx.guild_id, канал.id, текст))
-    conn.commit()
-    
-    await ctx.response.send_message(f"✅ Приветствие успешно настроено!\n📺 Канал: {канал.mention}\n📝 Текст: {текст}", ephemeral=True)
+        await ctx.response.send_message(f"➖ Доступ для {выбор_объекта.mention} успешно аннулирован.", ephemeral=True)
 
 # ================= ЗАПУСК БОТА =================
 async def main():
