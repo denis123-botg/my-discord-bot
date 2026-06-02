@@ -55,7 +55,6 @@ cursor.execute("""
     )
 """)
 
-# Таблица для сохранения режима анкеты (1 - включен, 0 - выключен)
 cursor.execute("""
     CREATE TABLE IF NOT EXISTS bot_settings (
         key TEXT PRIMARY KEY,
@@ -97,16 +96,21 @@ def check_staff_permission(user: discord.Member) -> bool:
         
     return False
 
-# ================= ВЕБ-СЕРВЕР ДЛЯ RENDER =================
-async def handle(request): return web.Response(text="Work")
+# ================= НАДЕЖНЫЙ ВЕБ-СЕРВЕР ДЛЯ РЕНДЕРА =================
+async def handle(request):
+    return web.Response(text="Work")
+
 async def start_server():
     app = web.Application()
     app.router.add_get('/', handle)
+    port = int(os.getenv("PORT", 10000))
     runner = web.AppRunner(app)
     await runner.setup()
-    await web.TCPSite(runner, '0.0.0.0', int(os.getenv("PORT", 10000))).start()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    print(f"Веб-сервер успешно запущен на порту {port}")
 
-# ================= ЛОГИКА ДЛЯ РАБОТЫ КНОПОК ПРИНЯТИЯ И ОТКАЗА =================
+# ================= ЛОГИКА ДЛЯ КНОПОК ПРИНЯТИЯ И ОТКАЗА =================
 async def process_approve(interaction: discord.Interaction, target_id: int):
     member = interaction.guild.get_member(target_id)
     if member:
@@ -141,7 +145,7 @@ async def process_deny(interaction: discord.Interaction, target_id: int):
     await ch.send(f"⚠️ <@{target_id}>, ваша анкета отклонена. Ожидайте модератора в этом канале.", view=DenyChatView())
     return ch
 
-# ================= VIEWS =================
+# ================= VIEWS (ИНТЕРФЕЙС КНОПОК) =================
 class AliveButtonView(View):
     def __init__(self, target_id):
         super().__init__(timeout=None)
@@ -219,7 +223,8 @@ class RegistrationView(View):
         v = View()
         v.add_item(discord.ui.Button(label="Открыть анкету", url=url))
         await itn.response.send_message("Твоя персональная ссылка на анкету:", view=v, ephemeral=True)
-# ================= BOT CLASS =================
+
+# ================= КЛАСС БОТА И СОБЫТИЯ =================
 class MyBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=discord.Intents.all())
@@ -241,38 +246,21 @@ class MyBot(commands.Bot):
         except Exception as e:
             print(f"Ошибка синхронизации слэш-команд: {e}")
             
-        player_role = guild.get_role(ROLE_PLAYER)
-        if not player_role: return
-
-        print("Запуск БЕЗОПАСНОЙ очистки и синхронизации...")
-        current_time = datetime.now(timezone.utc)
-        
-        for member in guild.members:
-            if member.bot: continue
-            if player_role in member.roles:
-                cursor.execute("SELECT user_id FROM activity WHERE user_id = ?", (member.id,))
-                if cursor.fetchone() is None:
-                    update_user_activity(member.id, current_time)
-                
-        print("База данных успешно сброшена на безопасный режим.")
-        
         if not self.check_activity_loop.is_running(): self.check_activity_loop.start()
         if not self.auto_purge_loop.is_running(): self.auto_purge_loop.start()
+        if not self.sync_db_loop.is_running(): self.sync_db_loop.start()
+        print("Все фоновые задачи успешно запущены.")
 
-    # ИЗМЕНЕННАЯ ЛОГИКА ВХОДА С УЧЕТОМ РЕЖИМА АНКЕТЫ
     async def on_member_join(self, m):
         if get_survey_mode():
-            # Режим анкет включен: выдаем роль Кандидата
             r = m.guild.get_role(ROLE_CANDIDATE)
             if r: await m.add_roles(r)
         else:
-            # Режим анкет выключен: выдаем сразу Игрока и Зарегистрированного
             r_play = m.guild.get_role(ROLE_PLAYER)
             r_reg = m.guild.get_role(ROLE_REGISTERED)
             roles_to_add = [r for r in [r_play, r_reg] if r]
             if roles_to_add: 
                 await m.add_roles(*roles_to_add)
-            # Заносим сразу в БД активности, так как он стал полноценным игроком
             update_user_activity(m.id)
         
     async def on_message(self, m):
@@ -284,6 +272,22 @@ class MyBot(commands.Bot):
                     await m.channel.send(content=m.content, view=AdminReviewView())
             return
         update_user_activity(m.author.id)
+
+    @tasks.loop(hours=1)
+    async def sync_db_loop(self):
+        await self.wait_until_ready()
+        if not self.guilds: return
+        guild = self.guilds[0]
+        player_role = guild.get_role(ROLE_PLAYER)
+        if not player_role: return
+
+        current_time = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+        active_members_ids = [m.id for m in guild.members if not m.bot and player_role in m.roles]
+        
+        for member_id in active_members_ids:
+            cursor.execute("INSERT OR IGNORE INTO activity (user_id, last_active, warned) VALUES (?, ?, 0)", 
+                           (member_id, current_time))
+        conn.commit()
 
     @tasks.loop(hours=1)
     async def check_activity_loop(self):
@@ -327,7 +331,6 @@ class MyBot(commands.Bot):
         await self.wait_until_ready()
         cursor.execute("SELECT channel_id, time_value, time_type FROM auto_purge")
         channels = cursor.fetchall()
-        
         now = datetime.now(timezone.utc)
         
         for ch_id, val, t_type in channels:
@@ -346,7 +349,7 @@ class MyBot(commands.Bot):
 
 bot = MyBot()
 
-# ================= ОБНОВЛЕННЫЕ СЛЭШ-КОМАНДЫ =================
+# ================= СЛЭШ-КОМАНДЫ =================
 
 @bot.tree.command(name="установка_анкеты", description="Включить стандартный режим анкет для новых участников")
 async def _установка_анкеты(ctx: discord.Interaction):
@@ -354,15 +357,15 @@ async def _установка_анкеты(ctx: discord.Interaction):
         await ctx.response.send_message("❌ У вас нет прав на использование этой команды.", ephemeral=True)
         return
     set_survey_mode(True)
-    await ctx.response.send_message("✅ **Режим анкет успешно включен!** Теперь новые участники будут получать роль <@&1259813357763170394>.", ephemeral=True)
+    await ctx.response.send_message("✅ **Режим анкет успешно включен!** Новые участники получают роль Кандидата.", ephemeral=True)
 
-@bot.tree.command(name="убрать_анкету", description="Выключить режим анкет (новые участники сразу получают роли Игрока и Зарегистрированного)")
+@bot.tree.command(name="убрать_анкету", description="Выключить режим анкет (новые участники сразу получают роли Игрока)")
 async def _убрать_анкету(ctx: discord.Interaction):
     if not check_staff_permission(ctx.user):
         await ctx.response.send_message("❌ У вас нет прав на использование этой команды.", ephemeral=True)
         return
     set_survey_mode(False)
-    await ctx.response.send_message("🛑 **Режим анкет выключен!** Теперь новые участники сразу будут получать роли <@&1506372814477988002> и <@&1259828977942528111>.", ephemeral=True)
+    await ctx.response.send_message("🛑 **Режим анкет выключен!** Новые участники сразу будут получать роли Игрока.", ephemeral=True)
 
 @bot.tree.command(name="сообщение_анкеты", description="Отправить в текущий канал сообщение с кнопкой для подачи анкеты")
 async def _сообщение_анкеты(ctx: discord.Interaction):
@@ -370,7 +373,7 @@ async def _сообщение_анкеты(ctx: discord.Interaction):
         await ctx.response.send_message("❌ У вас нет прав на использование этой команды.", ephemeral=True)
         return
     await ctx.response.send_message("Создаю сообщение...", ephemeral=True)
-    await ctx.channel.send("**Добро пожаловать в Сирион Хаб! Нажмите кнопку ниже, чтобы заполнить анкету игрока и получить доступ к серверу:**", view=RegistrationView())
+    await ctx.channel.send("**Добро пожаловать в Сирион Хаб! Нажмите кнопку ниже, чтобы заполнить анкету игрока:**", view=RegistrationView())
 
 @bot.tree.command(name="очистить", description="Удалить определенное количество сообщений")
 @app_commands.describe(количество="Сколько сообщений нужно стереть")
@@ -391,7 +394,6 @@ async def _очистить(ctx: discord.Interaction, количество: int)
     app_commands.Choice(name="Часы", value="hours"),
     app_commands.Choice(name="Отключить автоочистку", value="off")
 ])
-@app_commands.describe(тип_времени="В чем измерять срок жизни сообщений", значение="Какое время выставить (пропусти, если отключаешь)")
 async def _автоочистка(ctx: discord.Interaction, тип_времени: str, значение: int = None):
     if not check_staff_permission(ctx.user):
         await ctx.response.send_message("❌ У вас нет доступа.", ephemeral=True)
@@ -404,15 +406,14 @@ async def _автоочистка(ctx: discord.Interaction, тип_времен�
         return
 
     if значение is None or значение < 1:
-        await ctx.response.send_message("❌ Вы должны указать числовое значение времени больше нуля!", ephemeral=True)
+        await ctx.response.send_message("❌ Вы должны указать значение больше нуля!", ephemeral=True)
         return
 
     cursor.execute("INSERT OR REPLACE INTO auto_purge (channel_id, time_value, time_type) VALUES (?, ?, ?)", 
                    (ctx.channel_id, значение, тип_времени))
     conn.commit()
-    
     label = "мин." if тип_времени == "minutes" else "ч."
-    await ctx.response.send_message(f"⚙️ Срок успешно изменен! Теперь сообщения старше **{значение} {label}** будут мгновенно стираться пачкой.", ephemeral=True)
+    await ctx.response.send_message(f"⚙️ Теперь сообщения старше **{значение} {label}** автоматически стираются.", ephemeral=True)
 
 @bot.tree.command(name="доступ", description="Управление правами доступа к командам бота")
 @app_commands.choices(действие=[
@@ -420,44 +421,41 @@ async def _автоочистка(ctx: discord.Interaction, тип_времен�
     app_commands.Choice(name="Забрать доступ", value="remove"),
     app_commands.Choice(name="Список персонала", value="list")
 ])
-@app_commands.describe(действие="Что сделать с доступом", пользователь="Выберите пользователя", роль="Выберите роль (если настраиваете для роли)")
 async def _доступ(ctx: discord.Interaction, действие: str, пользователь: discord.Member = None, роль: discord.Role = None):
     if ctx.user.id != MY_ID and not ctx.user.guild_permissions.administrator:
-        await ctx.response.send_message("❌ Настройка доступов доступна только Главному Администратору.", ephemeral=True)
+        await ctx.response.send_message("❌ Доступно только Главному Администратору.", ephemeral=True)
         return
 
     if действие == "list":
         cursor.execute("SELECT target_id FROM staff_access")
         rows = cursor.fetchall()
         if not rows:
-            await ctx.response.send_message("ℹ️ Кастомных доступов нет. Права есть у Администраторов и Модераторов.", ephemeral=True)
+            await ctx.response.send_message("ℹ️ Кастомных доступов нет.", ephemeral=True)
             return
-        text = "📋 **Персонал с кастомным доступом к боту:**\n"
+        text = "📋 **Персонал с доступом к боту:**\n"
         for r in rows: text += f"• <@&{r[0]}> / <@{r[0]}> (ID: `{r[0]}`)\n"
         await ctx.response.send_message(text, ephemeral=True)
         return
 
-    # Проверяем, что передан хотя бы один объект
     объект = пользователь or роль
     if not объект:
-        await ctx.response.send_message("❌ Вы должны выбрать либо пользователя, либо роль в параметрах команды!", ephemeral=True)
+        await ctx.response.send_message("❌ Выберите пользователя или роль!", ephemeral=True)
         return
 
-    target_id = объект.id
-
     if действие == "add":
-        cursor.execute("INSERT OR REPLACE INTO staff_access (target_id, type) VALUES (?, 'custom')", (target_id,))
+        cursor.execute("INSERT OR REPLACE INTO staff_access (target_id, type) VALUES (?, 'custom')", (объект.id,))
         conn.commit()
-        await ctx.response.send_message(f"✅ Доступ для {объект.mention} успешно выдан.", ephemeral=True)
+        await ctx.response.send_message(f"✅ Доступ для {объект.mention} выдан.", ephemeral=True)
     elif действие == "remove":
-        cursor.execute("DELETE FROM staff_access WHERE target_id = ?", (target_id,))
+        cursor.execute("DELETE FROM staff_access WHERE target_id = ?", (объект.id,))
         conn.commit()
-        await ctx.response.send_message(f"➖ Доступ для {объект.mention} успешно аннулирован.", ephemeral=True)
+        await ctx.response.send_message(f"➖ Доступ для {объект.mention} аннулирован.", ephemeral=True)
 
 # ================= ЗАПУСК БОТА =================
 async def main():
     await start_server()
-    async with bot: await bot.start(TOKEN)
+    async with bot: 
+        await bot.start(TOKEN)
 
 if __name__ == "__main__":
     asyncio.run(main())
