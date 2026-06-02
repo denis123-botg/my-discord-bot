@@ -453,9 +453,20 @@ async def _доступ(ctx: discord.Interaction, действие: str, пол�
 
 # ================= ЗАПУСК БОТА =================
 async def main():
-    await start_server()
-    async with bot: 
+    # 1. Запускаем веб-сервер в фоне моментально, чтобы удовлетворить Render
+    server_task = asyncio.create_task(start_server())
+    
+    # Даем серверу долю секунды полностью занять порт
+    await asyncio.sleep(0.5) 
+    
+    # 2. Только после этого спокойно стартуем Дискорд бота
+    try:
         await bot.start(TOKEN)
+    except Exception as e:
+        print(f"Критическая ошибка при запуске Discord бота: {e}")
+    finally:
+        # Если бот упадет, фоновый сервер тоже закроется
+        server_task.cancel()
 
 if __name__ == "__main__":
     asyncio.run(main())
