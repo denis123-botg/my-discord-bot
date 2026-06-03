@@ -21,6 +21,9 @@ ADMIN_CHANNEL_ID = int(os.environ.get("ADMIN_CHANNEL_ID", 0))
 ACTIVITY_WARNING_CHANNEL_ID = int(os.environ.get("ACTIVITY_WARNING_CHANNEL_ID", 0))
 WELCOME_CHANNEL_ID = int(os.environ.get("WELCOME_CHANNEL_ID", 0))
 
+# ID канала для подачи анкеты (только для кандидатов)
+ANKETA_CHANNEL_ID = 1495026945069682882
+
 ROLE_CANDIDATE = "Кандидат"
 ROLE_PLAYER = "Игрок"
 ROLE_REGISTERED = "Зарегистрирован"
@@ -148,7 +151,6 @@ class SirionBot(commands.Bot):
             last_time = row[0] if row else 0
             warned_time = row[1] if row else 0
 
-            # 6 дней неактивности → предупреждение
             if now - last_time > 6 * 86400:
                 if warned_time == 0 or now - warned_time > 86400:
                     channel = self.get_channel(ACTIVITY_WARNING_CHANNEL_ID)
@@ -161,7 +163,6 @@ class SirionBot(commands.Bot):
                                        (member.id, last_time, now))
                         db.commit()
             
-            # 7 дней → кик
             if warned_time and now - warned_time > 86400 and now - last_time > 7 * 86400:
                 await member.kick(reason="Неактивность более 7 дней")
                 cursor.execute("DELETE FROM member_activity WHERE user_id = ?", (member.id,))
@@ -189,17 +190,27 @@ class SirionBot(commands.Bot):
 
 bot = SirionBot()
 
+# ===== ФУНКЦИЯ ДЛЯ СКРЫТИЯ/ПОКАЗА КАНАЛОВ =====
+async def update_channel_visibility(member: discord.Member, is_candidate: bool):
+    """Скрывает или показывает каналы в зависимости от роли"""
+    anketa_channel = bot.get_channel(ANKETA_CHANNEL_ID)
+    if anketa_channel:
+        if is_candidate:
+            # Кандидат: видит только канал для анкеты
+            await anketa_channel.set_permissions(member, read_messages=True)
+        else:
+            # Игрок: убираем специальные права (возвращаем стандартные)
+            await anketa_channel.set_permissions(member, overwrite=None)
+
 # ===== СОБЫТИЯ =====
 @bot.event
 async def on_ready():
     print(f"✅ Бот {bot.user} запущен на {len(bot.guilds)} серверах")
-    print(f"📋 Команды синхронизированы")
 
 @bot.event
 async def on_message(message):
     if message.author.bot:
         return
-    # Обновляем активность
     cursor.execute("REPLACE INTO member_activity (user_id, last_message_time, warned_time) VALUES (?, ?, 0)",
                    (message.author.id, int(time.time())))
     db.commit()
@@ -215,6 +226,8 @@ async def on_member_join(member):
         role = discord.utils.get(member.guild.roles, name=ROLE_CANDIDATE)
         if role:
             await member.add_roles(role)
+            # Скрываем все каналы кроме канала для анкеты
+            await update_channel_visibility(member, True)
         
         # Генерация персональной ссылки
         unique_link = f"https://ваш-сайт.ru/anketa?discord_id={member.id}"
@@ -233,13 +246,15 @@ async def on_member_join(member):
             await member.add_roles(player_role)
         if registered_role:
             await member.add_roles(registered_role)
+        
+        # Показываем все каналы
+        await update_channel_visibility(member, False)
 
 @bot.event
 async def on_interaction(interaction: discord.Interaction):
     if interaction.type == discord.InteractionType.component:
         custom_id = interaction.data.get("custom_id", "")
         
-        # Кнопка "Я тут!"
         if custom_id.startswith("imhere_"):
             user_id = int(custom_id.split("_")[1])
             if interaction.user.id == user_id:
@@ -252,7 +267,6 @@ async def on_interaction(interaction: discord.Interaction):
                 await interaction.response.send_message("❌ Эта кнопка не для вас!", ephemeral=True)
             return
         
-        # Кнопки принятия/отказа анкет
         if custom_id.startswith("accept_"):
             user_id = int(custom_id.split("_")[1])
             member = interaction.guild.get_member(user_id)
@@ -268,6 +282,9 @@ async def on_interaction(interaction: discord.Interaction):
                 if registered_role:
                     await member.add_roles(registered_role)
                 
+                # Показываем все каналы игроку
+                await update_channel_visibility(member, False)
+                
                 await interaction.response.send_message(f"✅ Анкета {member.display_name} принята.", ephemeral=True)
                 try:
                     await member.send("🎉 Ваша анкета одобрена! Добро пожаловать на сервер.")
@@ -279,7 +296,6 @@ async def on_interaction(interaction: discord.Interaction):
             user_id = int(custom_id.split("_")[1])
             member = interaction.guild.get_member(user_id)
             if member:
-                # Создаём изолированный чат
                 category = discord.utils.get(interaction.guild.categories, name="Разбор отказов")
                 if not category:
                     category = await interaction.guild.create_category("Разбор отказов")
@@ -307,7 +323,7 @@ def mod_only():
 @mod_only()
 async def setup_ankety(interaction: discord.Interaction):
     set_config("anketa_mode", "on")
-    await interaction.response.send_message("✅ Режим анкет включён. Новые участники получают роль `Кандидат`.", ephemeral=True)
+    await interaction.response.send_message("✅ Режим анкет включён. Новые участники получают роль `Кандидат` и видят только канал для анкеты.", ephemeral=True)
 
 @bot.tree.command(name="убрать_анкету", description="Отключить проверку анкет")
 @mod_only()
