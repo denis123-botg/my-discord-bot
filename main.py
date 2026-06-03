@@ -6,10 +6,10 @@ import aiohttp
 from aiohttp import web
 import asyncio
 import sqlite3
-import json
 import datetime
 import time
-from typing import Optional, Dict, List
+import re
+from typing import Dict, List, Optional
 
 # ===== КОНФИГУРАЦИЯ =====
 TOKEN = os.environ.get("DISCORD_TOKEN")
@@ -27,8 +27,6 @@ ANKETA_CHANNEL_ID = 1495026945069682882
 ROLE_CANDIDATE = "Кандидат"
 ROLE_PLAYER = "Игрок"
 ROLE_REGISTERED = "Зарегистрирован"
-
-auto_cleanup_config: Dict[int, int] = {}
 
 # ===== БАЗА ДАННЫХ =====
 db = sqlite3.connect("sirion_hub.db", check_same_thread=False)
@@ -70,6 +68,16 @@ CREATE TABLE IF NOT EXISTS cleanup_jobs (
 )
 """)
 
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS welcome_settings (
+    channel_id INTEGER,
+    message_text TEXT,
+    embed_title TEXT,
+    embed_description TEXT,
+    embed_color TEXT
+)
+""")
+
 db.commit()
 
 # ===== ФУНКЦИИ БАЗЫ ДАННЫХ =====
@@ -95,19 +103,63 @@ def remove_mod(user_id: int):
     cursor.execute("DELETE FROM mods WHERE user_id = ?", (user_id,))
     db.commit()
 
+def get_all_mods():
+    cursor.execute("SELECT user_id FROM mods WHERE can_moderate = 1")
+    return [row[0] for row in cursor.fetchall()]
+
+def parse_time(time_str: str) -> int:
+    time_str = time_str.lower().strip()
+    if time_str.endswith('с'):
+        return int(time_str[:-1])
+    elif time_str.endswith('м'):
+        return int(time_str[:-1]) * 60
+    elif time_str.endswith('ч'):
+        return int(time_str[:-1]) * 3600
+    elif time_str.endswith('д'):
+        return int(time_str[:-1]) * 86400
+    else:
+        return int(time_str) * 60
+
+def format_time(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds} секунд"
+    elif seconds < 3600:
+        return f"{seconds // 60} минут"
+    elif seconds < 86400:
+        return f"{seconds // 3600} часов"
+    else:
+        return f"{seconds // 86400} дней"
+
+def get_welcome_settings():
+    cursor.execute("SELECT channel_id, message_text, embed_title, embed_description, embed_color FROM welcome_settings LIMIT 1")
+    row = cursor.fetchone()
+    if row:
+        return {
+            "channel_id": row[0],
+            "message_text": row[1],
+            "embed_title": row[2],
+            "embed_description": row[3],
+            "embed_color": row[4]
+        }
+    return None
+
+def set_welcome_settings(channel_id: int, message_text: str = None, embed_title: str = None, embed_description: str = None, embed_color: str = None):
+    cursor.execute("DELETE FROM welcome_settings")
+    cursor.execute("INSERT INTO welcome_settings (channel_id, message_text, embed_title, embed_description, embed_color) VALUES (?, ?, ?, ?, ?)",
+                   (channel_id, message_text, embed_title, embed_description, embed_color))
+    db.commit()
+
 # ===== БОТ =====
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.guilds = True
-intents.guild_messages = True
 
 class SirionBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="s!", intents=intents)
 
     async def setup_hook(self):
-        # Синхронизация команд
         if GUILD_ID:
             guild = discord.Object(id=GUILD_ID)
             self.tree.copy_global_to(guild=guild)
@@ -115,30 +167,22 @@ class SirionBot(commands.Bot):
         else:
             await self.tree.sync()
         
-        # Запуск веб-сервера
         self.loop.create_task(self.start_web_server())
-        
-        # Запуск задач
         self.check_activity.start()
         self.auto_cleanup_loop.start()
-        
-        print("✅ Бот готов, все задачи запущены")
+        print("✅ Бот готов")
 
     async def start_web_server(self):
         app = web.Application()
-        app.router.add_get("/", self.health_check)
+        app.router.add_get("/", lambda r: web.Response(text="OK"))
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", 10000)
         await site.start()
         print("🌐 Веб-сервер на порту 10000")
 
-    async def health_check(self, request):
-        return web.Response(text="OK", status=200)
-
     @tasks.loop(hours=1)
     async def check_activity(self):
-        """Проверка активности игроков"""
         guild = self.guilds[0] if self.guilds else None
         if not guild:
             return
@@ -174,7 +218,6 @@ class SirionBot(commands.Bot):
 
     @tasks.loop(minutes=30)
     async def auto_cleanup_loop(self):
-        """Автоочистка каналов"""
         cursor.execute("SELECT channel_id, delete_after_seconds FROM cleanup_jobs")
         jobs = cursor.fetchall()
         for channel_id, seconds in jobs:
@@ -190,17 +233,35 @@ class SirionBot(commands.Bot):
 
 bot = SirionBot()
 
-# ===== ФУНКЦИЯ ДЛЯ СКРЫТИЯ/ПОКАЗА КАНАЛОВ =====
 async def update_channel_visibility(member: discord.Member, is_candidate: bool):
-    """Скрывает или показывает каналы в зависимости от роли"""
     anketa_channel = bot.get_channel(ANKETA_CHANNEL_ID)
     if anketa_channel:
         if is_candidate:
-            # Кандидат: видит только канал для анкеты
             await anketa_channel.set_permissions(member, read_messages=True)
         else:
-            # Игрок: убираем специальные права (возвращаем стандартные)
             await anketa_channel.set_permissions(member, overwrite=None)
+
+async def send_welcome_message(member: discord.Member):
+    settings = get_welcome_settings()
+    if not settings:
+        return
+    
+    channel = bot.get_channel(settings["channel_id"])
+    if not channel:
+        return
+    
+    if settings.get("message_text"):
+        text = settings["message_text"].replace("{user}", member.name).replace("{user_mention}", member.mention)
+        await channel.send(text)
+    
+    if settings.get("embed_title") or settings.get("embed_description"):
+        color = int(settings["embed_color"], 16) if settings.get("embed_color") else 0x00ff00
+        embed = discord.Embed(
+            title=settings["embed_title"].replace("{user}", member.name) if settings.get("embed_title") else None,
+            description=settings["embed_description"].replace("{user}", member.name) if settings.get("embed_description") else None,
+            color=color
+        )
+        await channel.send(embed=embed)
 
 # ===== СОБЫТИЯ =====
 @bot.event
@@ -218,18 +279,16 @@ async def on_message(message):
 
 @bot.event
 async def on_member_join(member):
-    """Приём новых участников"""
+    await send_welcome_message(member)
+    
     anketa_mode = get_config("anketa_mode", "off")
     
     if anketa_mode == "on":
-        # Режим анкет: выдаём роль Кандидат
         role = discord.utils.get(member.guild.roles, name=ROLE_CANDIDATE)
         if role:
             await member.add_roles(role)
-            # Скрываем все каналы кроме канала для анкеты
             await update_channel_visibility(member, True)
         
-        # Генерация персональной ссылки
         unique_link = f"https://ваш-сайт.ru/anketa?discord_id={member.id}"
         cursor.execute("REPLACE INTO user_links (user_id, link) VALUES (?, ?)", (member.id, unique_link))
         db.commit()
@@ -239,155 +298,220 @@ async def on_member_join(member):
         except:
             pass
     else:
-        # Режим без анкет: выдаём роли сразу
         player_role = discord.utils.get(member.guild.roles, name=ROLE_PLAYER)
         registered_role = discord.utils.get(member.guild.roles, name=ROLE_REGISTERED)
         if player_role:
             await member.add_roles(player_role)
         if registered_role:
             await member.add_roles(registered_role)
-        
-        # Показываем все каналы
         await update_channel_visibility(member, False)
 
 @bot.event
 async def on_interaction(interaction: discord.Interaction):
-    if interaction.type == discord.InteractionType.component:
-        custom_id = interaction.data.get("custom_id", "")
-        
-        if custom_id.startswith("imhere_"):
-            user_id = int(custom_id.split("_")[1])
-            if interaction.user.id == user_id:
-                cursor.execute("UPDATE member_activity SET warned_time = 0, last_message_time = ? WHERE user_id = ?",
-                               (int(time.time()), user_id))
-                db.commit()
-                await interaction.response.send_message("✅ Рады, что ты с нами!", ephemeral=True)
-                await interaction.message.delete()
-            else:
-                await interaction.response.send_message("❌ Эта кнопка не для вас!", ephemeral=True)
-            return
-        
-        if custom_id.startswith("accept_"):
-            user_id = int(custom_id.split("_")[1])
-            member = interaction.guild.get_member(user_id)
-            if member:
-                candidate_role = discord.utils.get(interaction.guild.roles, name=ROLE_CANDIDATE)
-                player_role = discord.utils.get(interaction.guild.roles, name=ROLE_PLAYER)
-                registered_role = discord.utils.get(interaction.guild.roles, name=ROLE_REGISTERED)
-                
-                if candidate_role and candidate_role in member.roles:
-                    await member.remove_roles(candidate_role)
-                if player_role:
-                    await member.add_roles(player_role)
-                if registered_role:
-                    await member.add_roles(registered_role)
-                
-                # Показываем все каналы игроку
-                await update_channel_visibility(member, False)
-                
-                await interaction.response.send_message(f"✅ Анкета {member.display_name} принята.", ephemeral=True)
-                try:
-                    await member.send("🎉 Ваша анкета одобрена! Добро пожаловать на сервер.")
-                except:
-                    pass
-            return
-        
-        if custom_id.startswith("reject_"):
-            user_id = int(custom_id.split("_")[1])
-            member = interaction.guild.get_member(user_id)
-            if member:
-                category = discord.utils.get(interaction.guild.categories, name="Разбор отказов")
-                if not category:
-                    category = await interaction.guild.create_category("Разбор отказов")
-                
-                overwrites = {
-                    interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
-                    member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
-                    interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True)
-                }
-                channel = await category.create_text_channel(f"отказ-{member.name}", overwrites=overwrites)
-                await channel.send(f"{member.mention}, {interaction.user.mention}, обсуждение причины отказа.")
-                await interaction.response.send_message(f"✅ Создан чат {channel.mention}", ephemeral=True)
-            return
+    if interaction.type != discord.InteractionType.component:
+        return
+    
+    custom_id = interaction.data.get("custom_id", "")
+    
+    if custom_id.startswith("imhere_"):
+        user_id = int(custom_id.split("_")[1])
+        if interaction.user.id == user_id:
+            cursor.execute("UPDATE member_activity SET warned_time = 0, last_message_time = ? WHERE user_id = ?",
+                           (int(time.time()), user_id))
+            db.commit()
+            await interaction.response.send_message("✅ Рады, что ты с нами!", ephemeral=True)
+            await interaction.message.delete()
+        else:
+            await interaction.response.send_message("❌ Эта кнопка не для вас!", ephemeral=True)
+        return
+    
+    if custom_id.startswith("accept_"):
+        user_id = int(custom_id.split("_")[1])
+        member = interaction.guild.get_member(user_id)
+        if member:
+            candidate_role = discord.utils.get(interaction.guild.roles, name=ROLE_CANDIDATE)
+            player_role = discord.utils.get(interaction.guild.roles, name=ROLE_PLAYER)
+            registered_role = discord.utils.get(interaction.guild.roles, name=ROLE_REGISTERED)
+            
+            if candidate_role and candidate_role in member.roles:
+                await member.remove_roles(candidate_role)
+            if player_role:
+                await member.add_roles(player_role)
+            if registered_role:
+                await member.add_roles(registered_role)
+            
+            await update_channel_visibility(member, False)
+            
+            await interaction.response.send_message(f"✅ Анкета {member.display_name} принята.", ephemeral=True)
+            try:
+                await member.send("🎉 Ваша анкета одобрена! Добро пожаловать на сервер.")
+            except:
+                pass
+        return
+    
+    if custom_id.startswith("reject_"):
+        user_id = int(custom_id.split("_")[1])
+        member = interaction.guild.get_member(user_id)
+        if member:
+            category = discord.utils.get(interaction.guild.categories, name="Разбор отказов")
+            if not category:
+                category = await interaction.guild.create_category("Разбор отказов")
+            
+            overwrites = {
+                interaction.guild.default_role: discord.PermissionOverwrite(read_messages=False),
+                member: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+                interaction.user: discord.PermissionOverwrite(read_messages=True, send_messages=True)
+            }
+            channel = await category.create_text_channel(f"отказ-{member.name}", overwrites=overwrites)
+            await channel.send(f"{member.mention}, {interaction.user.mention}, обсуждение причины отказа.")
+            await interaction.response.send_message(f"✅ Создан чат {channel.mention}", ephemeral=True)
+        return
 
 # ===== СЛЭШ-КОМАНДЫ =====
 def mod_only():
     async def predicate(interaction: discord.Interaction):
         if interaction.user.guild_permissions.administrator or is_mod(interaction.user.id):
             return True
-        await interaction.response.send_message("❌ У вас нет прав на использование этой команды.", ephemeral=True)
+        await interaction.response.send_message("❌ У вас нет прав", ephemeral=True)
         return False
     return app_commands.check(predicate)
 
-@bot.tree.command(name="установка_анкеты", description="Включить обязательную проверку анкет")
+# ===== 1. РЕЖИМ АНКЕТ (ОДНА КОМАНДА) =====
+@bot.tree.command(name="режим_анкет", description="Включить/выключить/статус режима анкет")
+@app_commands.describe(действие="on - включить, off - выключить, status - статус")
 @mod_only()
-async def setup_ankety(interaction: discord.Interaction):
-    set_config("anketa_mode", "on")
-    await interaction.response.send_message("✅ Режим анкет включён. Новые участники получают роль `Кандидат` и видят только канал для анкеты.", ephemeral=True)
+async def anketa_mode(interaction: discord.Interaction, действие: str):
+    if действие.lower() == "on":
+        set_config("anketa_mode", "on")
+        embed = discord.Embed(title="✅ Режим анкет ВКЛЮЧЁН", description="Новые участники получают роль **Кандидат**", color=discord.Color.green())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    elif действие.lower() == "off":
+        set_config("anketa_mode", "off")
+        embed = discord.Embed(title="✅ Режим анкет ВЫКЛЮЧЕН", description="Новые участники сразу получают роли **Игрок** и **Зарегистрирован**", color=discord.Color.red())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    elif действие.lower() == "status":
+        current = get_config("anketa_mode", "off")
+        status_text = "ВКЛЮЧЁН" if current == "on" else "ВЫКЛЮЧЕН"
+        color = discord.Color.green() if current == "on" else discord.Color.red()
+        embed = discord.Embed(title="📋 Статус режима анкет", description=f"Режим анкет **{status_text}**", color=color)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    else:
+        await interaction.response.send_message("❌ Используйте `on`, `off` или `status`", ephemeral=True)
 
-@bot.tree.command(name="убрать_анкету", description="Отключить проверку анкет")
+# ===== 2. КНОПКА АНКЕТЫ =====
+@bot.tree.command(name="кнопка_анкеты", description="Отправить сообщение с кнопкой для заполнения анкеты")
+@app_commands.describe(ссылка="Ссылка на сайт с анкетой")
 @mod_only()
-async def remove_anketu(interaction: discord.Interaction):
-    set_config("anketa_mode", "off")
-    await interaction.response.send_message("✅ Режим анкет выключен. Новые участники сразу получают `Игрок` и `Зарегистрирован`.", ephemeral=True)
-
-@bot.tree.command(name="сообщение_анкеты", description="Отправить приветственный пост с кнопкой на сайт")
-@mod_only()
-async def anketa_message(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="📝 Заполните анкету",
-        description="Нажмите на кнопку ниже, чтобы перейти на сайт и заполнить заявку.",
-        color=discord.Color.blue()
-    )
+async def anketa_button(interaction: discord.Interaction, ссылка: str):
+    embed = discord.Embed(title="📝 Заполните анкету", description="Нажмите на кнопку ниже", color=discord.Color.blue())
     view = discord.ui.View()
-    view.add_item(discord.ui.Button(label="📋 Заполнить анкету", url="https://ваш-сайт-анкеты.ru"))
+    view.add_item(discord.ui.Button(label="📋 Заполнить анкету", url=ссылка, style=discord.ButtonStyle.link))
     channel = bot.get_channel(WELCOME_CHANNEL_ID)
     if channel:
         await channel.send(embed=embed, view=view)
-        await interaction.response.send_message("✅ Сообщение отправлено!", ephemeral=True)
+        await interaction.response.send_message(f"✅ Сообщение отправлено в <#{WELCOME_CHANNEL_ID}>", ephemeral=True)
     else:
-        await interaction.response.send_message("❌ Канал не найден. Проверьте WELCOME_CHANNEL_ID", ephemeral=True)
+        await interaction.response.send_message("❌ Канал не найден", ephemeral=True)
 
-@bot.tree.command(name="очистить", description="Удалить указанное количество сообщений")
-@app_commands.describe(amount="Количество сообщений (1-100)")
+# ===== 3. ПРИВЕТСТВИЕ (ОДНА КОМАНДА) =====
+@bot.tree.command(name="приветствие", description="Настройка приветственного сообщения")
+@app_commands.describe(
+    канал="Канал для приветствий",
+    текст="Текст сообщения (используйте {user} или {user_mention})",
+    заголовок="Заголовок Embed",
+    описание="Описание Embed",
+    цвет="Цвет Embed (HEX)"
+)
+@mod_only()
+async def welcome(interaction: discord.Interaction, канал: discord.TextChannel, текст: str = None, заголовок: str = None, описание: str = None, цвет: str = None):
+    color_hex = None
+    if цвет:
+        цвет = цвет.replace("#", "")
+        if len(цвет) == 6 and all(c in "0123456789ABCDEFabcdef" for c in цвет):
+            color_hex = цвет
+        else:
+            await interaction.response.send_message("❌ Неверный формат цвета! Используйте #00FF00", ephemeral=True)
+            return
+    
+    set_welcome_settings(канал.id, текст, заголовок, описание, color_hex)
+    embed = discord.Embed(title="✅ Настройки приветствия сохранены!", description=f"**Канал:** {канал.mention}", color=discord.Color.green())
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="приветствие_откл", description="Отключить приветственное сообщение")
+@mod_only()
+async def welcome_off(interaction: discord.Interaction):
+    cursor.execute("DELETE FROM welcome_settings")
+    db.commit()
+    await interaction.response.send_message("❌ Приветствие отключено", ephemeral=True)
+
+# ===== 4. ОЧИСТИТЬ =====
+@bot.tree.command(name="очистить", description="Удалить сообщения")
+@app_commands.describe(amount="Количество (1-100)")
 @mod_only()
 async def clear(interaction: discord.Interaction, amount: int):
     if amount < 1 or amount > 100:
-        await interaction.response.send_message("❌ Укажите число от 1 до 100.", ephemeral=True)
+        await interaction.response.send_message("❌ От 1 до 100", ephemeral=True)
         return
     await interaction.channel.purge(limit=amount)
-    await interaction.response.send_message(f"🗑 Удалено {amount} сообщений.", ephemeral=True)
+    await interaction.response.send_message(f"🗑 Удалено {amount} сообщений", ephemeral=True)
 
-@bot.tree.command(name="автоочистка", description="Настройка автоочистки в канале")
-@app_commands.describe(channel="Канал", minutes="Через сколько минут удалять сообщения (0 = отключить)")
+# ===== 5. АВТООЧИСТКА =====
+@bot.tree.command(name="автоочистка", description="Настройка автоочистки")
+@app_commands.describe(channel="Канал", время="30с, 5м, 2ч, 1д или 0")
 @mod_only()
-async def auto_cleanup(interaction: discord.Interaction, channel: discord.TextChannel, minutes: int):
-    if minutes <= 0:
-        cursor.execute("DELETE FROM cleanup_jobs WHERE channel_id = ?", (channel.id,))
-        db.commit()
-        await interaction.response.send_message(f"⏹ Автоочистка в {channel.mention} отключена.", ephemeral=True)
-    else:
-        seconds = minutes * 60
+async def auto_cleanup(interaction: discord.Interaction, channel: discord.TextChannel, время: str):
+    try:
+        if время.lower() == "0" or время.lower() == "off":
+            cursor.execute("DELETE FROM cleanup_jobs WHERE channel_id = ?", (channel.id,))
+            db.commit()
+            await interaction.response.send_message(f"⏹ Автоочистка в {channel.mention} отключена", ephemeral=True)
+            return
+        
+        seconds = parse_time(время)
+        time_text = format_time(seconds)
         cursor.execute("REPLACE INTO cleanup_jobs (channel_id, delete_after_seconds) VALUES (?, ?)", (channel.id, seconds))
         db.commit()
-        await interaction.response.send_message(f"⏲ Настроена автоочистка в {channel.mention}: удаление сообщений старше {minutes} минут.", ephemeral=True)
+        await interaction.response.send_message(f"⏲ Автоочистка в {channel.mention}: удаление сообщений старше **{time_text}**", ephemeral=True)
+    except ValueError:
+        await interaction.response.send_message("❌ Неверный формат! Примеры: `30с`, `5м`, `2ч`, `1д`", ephemeral=True)
 
+# ===== 6. ДОСТУП (ОДНА КОМАНДА) =====
 @bot.tree.command(name="доступ", description="Управление модераторами бота")
-@app_commands.describe(action="add или remove", user="Пользователь")
+@app_commands.describe(действие="add - добавить, remove - удалить, list - список", пользователь="Пользователь")
 @mod_only()
-async def access(interaction: discord.Interaction, action: str, user: discord.User):
-    if action.lower() == "add":
-        add_mod(user.id)
-        await interaction.response.send_message(f"✅ {user.mention} теперь может управлять ботом.", ephemeral=True)
-    elif action.lower() == "remove":
-        remove_mod(user.id)
-        await interaction.response.send_message(f"❌ {user.mention} больше не имеет прав.", ephemeral=True)
+async def access(interaction: discord.Interaction, действие: str, пользователь: discord.User = None):
+    действие = действие.lower()
+    
+    if действие == "add":
+        if not пользователь:
+            await interaction.response.send_message("❌ Укажите пользователя: `/доступ add @user`", ephemeral=True)
+            return
+        add_mod(пользователь.id)
+        await interaction.response.send_message(f"✅ {пользователь.mention} добавлен", ephemeral=True)
+    
+    elif действие == "remove":
+        if not пользователь:
+            await interaction.response.send_message("❌ Укажите пользователя: `/доступ remove @user`", ephemeral=True)
+            return
+        remove_mod(пользователь.id)
+        await interaction.response.send_message(f"❌ {пользователь.mention} удалён", ephemeral=True)
+    
+    elif действие == "list":
+        mods = get_all_mods()
+        if not mods:
+            await interaction.response.send_message("📋 Список модераторов пуст", ephemeral=True)
+            return
+        mod_mentions = [f"• {interaction.guild.get_member(mid).mention if interaction.guild.get_member(mid) else f'<@{mid}>'}" for mid in mods]
+        embed = discord.Embed(title="🛡️ Модераторы бота", description="\n".join(mod_mentions), color=discord.Color.blue())
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    
     else:
-        await interaction.response.send_message("Используйте `add` или `remove`", ephemeral=True)
+        await interaction.response.send_message("❌ Используйте `add`, `remove` или `list`", ephemeral=True)
 
-@bot.tree.command(name="ping", description="Проверка работы бота")
+# ===== 7. PING =====
+@bot.tree.command(name="ping", description="Проверка")
 async def ping(interaction: discord.Interaction):
-    await interaction.response.send_message(f"🏓 Pong! Задержка: {round(bot.latency * 1000)}ms")
+    await interaction.response.send_message(f"🏓 Pong! {round(bot.latency * 1000)}ms")
 
 # ===== ЗАПУСК =====
 if __name__ == "__main__":
