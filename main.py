@@ -1,3 +1,4 @@
+import os
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
@@ -10,15 +11,25 @@ import datetime
 import time
 from typing import Optional, Dict, List
 
-# ------------------ КОНФИГУРАЦИЯ ------------------
-TOKEN = "ВАШ_ТОКЕН_БОТА"
-GUILD_ID = 123456789012345678  # ID основного сервера, или None для глобальных команд
-WEBHOOK_LOG_URL = "https://discord.com/api/webhooks/..."  # URL вебхука, куда сайт шлёт анкеты
-ADMIN_CHANNEL_ID = 123456789012345678  # Канал, куда бот пересылает анкеты на модерацию
-ACTIVITY_WARNING_CHANNEL_ID = 123456789012345678  # Канал, где бот тегает неактивных
-WELCOME_CHANNEL_ID = 123456789012345678  # Канал для приветственного сообщения с кнопкой
+# --- КОНФИГУРАЦИЯ ---
+TOKEN = os.environ.get("DISCORD_TOKEN")
 
-# Роли
+# Проверка: если токен не найден — завершаем с ошибкой
+if not TOKEN:
+    print("❌ ОШИБКА: Переменная DISCORD_TOKEN не найдена в Environment!")
+    print("Добавьте её в Render: Environment → DISCORD_TOKEN = ваш_токен")
+    exit(1)
+
+print(f"✅ Токен загружен из переменных окружения (длина: {len(TOKEN)})")
+
+# Остальные переменные тоже через окружение
+GUILD_ID = int(os.environ.get("GUILD_ID", 0)) or None
+ADMIN_CHANNEL_ID = int(os.environ.get("ADMIN_CHANNEL_ID", 0))
+ACTIVITY_WARNING_CHANNEL_ID = int(os.environ.get("ACTIVITY_WARNING_CHANNEL_ID", 0))
+WELCOME_CHANNEL_ID = int(os.environ.get("WELCOME_CHANNEL_ID", 0))
+WEBHOOK_LOG_URL = os.environ.get("WEBHOOK_LOG_URL", "")
+
+# Роли (можно тоже вынести в окружение, но пока оставим)
 ROLE_CANDIDATE = "Кандидат"
 ROLE_PLAYER = "Игрок"
 ROLE_REGISTERED = "Зарегистрирован"
