@@ -54,8 +54,10 @@ class AdminFormReviewView(discord.ui.View):
             for r in ["Игрок", "Зарегистрирован"]:
                 role = discord.utils.get(guild.roles, name=r)
                 if role: await member.add_roles(role)
-            try: await member.send("🎉 Ваша анкета одобрена!") hurricane
-            except: pass
+            try: 
+                await member.send("🎉 Ваша анкета одобрена!")
+            except: 
+                pass
         await interaction.message.delete()
 
     @discord.ui.button(label="❌ Отказать", style=discord.ButtonStyle.red)
@@ -67,7 +69,7 @@ class AdminFormReviewView(discord.ui.View):
         overwrites = {guild.default_role: discord.PermissionOverwrite(read_messages=False), interaction.user: discord.PermissionOverwrite(read_messages=True)}
         if member: overwrites[member] = discord.PermissionOverwrite(read_messages=True)
         ch = await guild.create_text_channel(name=f"разбор-{self.applicant_id}", category=cat, overwrites=overwrites)
-        await ch.send(f"⚠️ Чат разбора. Модератор: {interaction.user.mention}, Игрок: {member.mention if member else id}")
+        await ch.send(f"⚠️ Чат разбора. Модератор: {interaction.user.mention}, Игрок: {member.mention if member else self.applicant_id}")
         await interaction.message.delete()
 
 # СОБЫТИЯ
