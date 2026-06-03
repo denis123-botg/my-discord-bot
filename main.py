@@ -77,6 +77,7 @@ class AdminFormReviewView(discord.ui.View):
 async def on_ready():
     await init_db()
     print(f"[OK] Бот запущен: {bot.user}")
+    bot.tree.clear(guild=None)
     await bot.tree.sync()
     check_activity.start()
     auto_cleanup_loop.start()
