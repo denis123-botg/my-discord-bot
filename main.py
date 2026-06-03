@@ -77,8 +77,15 @@ class AdminFormReviewView(discord.ui.View):
 async def on_ready():
     await init_db()
     print(f"[OK] Бот запущен: {bot.user}")
+    
+    # Жёсткая очистка глобальных команд
     bot.tree.clear(guild=None)
+    await bot.tree.sync(guild=None)
+    print("[ОЧИСТКА] Все глобальные команды стёрты!")
+    
+    # Перезаписываем новые команды заново
     await bot.tree.sync()
+    
     check_activity.start()
     auto_cleanup_loop.start()
 
