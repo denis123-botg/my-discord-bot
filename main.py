@@ -87,10 +87,7 @@ class AdminFormReviewView(discord.ui.View):
 async def on_ready():
     await init_db()
     print(f"[OK] Бот запущен: {bot.user}")
-    
-    # Обычная синхронизация без бесконечного цикла очистки
     await bot.tree.sync()
-    
     check_activity.start()
     auto_cleanup_loop.start()
 
@@ -101,25 +98,33 @@ async def on_message(message):
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("INSERT OR REPLACE INTO member_activity VALUES (?, ?, 0, NULL)", (message.author.id, datetime.datetime.utcnow().isoformat()))
         await db.commit()
+    await bot.process_commands(message)
 
 @bot.event
 async def on_member_join(member):
     guild = member.guild
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT value FROM config WHERE key = 'reg_mode'") as c:
-            mode = (await c.fetchone())[0]
+            row = await c.fetchone()
+            mode = row[0] if row else "off"
+            
+        r_cand = discord.utils.get(guild.roles, name="Кандидат")
+        r_play = discord.utils.get(guild.roles, name="Игрок")
+        r_reg = discord.utils.get(guild.roles, name="Зарегистрирован")
+
         if mode == "on":
-            r = discord.utils.get(guild.roles, name="Кандидат")
-            if r: await member.add_roles(r)
-            try: 
-                await member.send(f"Ссылка на анкету: https://sirionhub.online/")
-            except: 
-                pass
+            if r_cand: await member.add_roles(r_cand)
+            if r_play: await member.remove_roles(r_play)
+            if r_reg: await member.remove_roles(r_reg)
+            try: await member.send("Привет! Наш server закрытого типа. Заполни анкету: https://sirionhub.online/")
+            except: pass
         else:
-            for r_name in ["Игрок", "Зарегистрирован"]:
-                r = discord.utils.get(guild.roles, name=r_name)
-                if r: await member.add_roles(r)
-        
+            if r_play: await member.add_roles(r_play)
+            if r_reg: await member.add_roles(r_reg)
+            if r_cand: await member.remove_roles(r_cand)
+            try: await member.send("Привет! Добро пожаловать на Sirion Hub! Тебе открыты все каналы.")
+            except: pass
+
         async with db.execute("SELECT channel_id, text, title, description, color FROM welcome_settings WHERE guild_id = ?", (guild.id,)) as c:
             w = await c.fetchone()
             if w:
@@ -176,7 +181,9 @@ async def reg_mode(interaction: discord.Interaction, status: str):
     async with aiosqlite.connect(DB_NAME) as db:
         if status == "status":
             async with db.execute("SELECT value FROM config WHERE key = 'reg_mode'") as c:
-                await interaction.response.send_message(f"Режим: {(await c.fetchone())[0]}")
+                row = await c.fetchone()
+                current = row[0] if row else "off"
+                await interaction.response.send_message(f"Режим анкет сейчас: {current}")
         else:
             await db.execute("INSERT OR REPLACE INTO config VALUES ('reg_mode', ?)", (status,))
             await db.commit()
@@ -186,10 +193,7 @@ async def reg_mode(interaction: discord.Interaction, status: str):
 async def cmd_btn(interaction: discord.Interaction):
     if not await is_mod(interaction): 
         return
-    
-    # Твоя ссылка намертво вшита внутрь
     ссылка = "https://sirionhub.online/"
-    
     v = discord.ui.View()
     v.add_item(discord.ui.Button(label="Заполнить анкету 📝", url=ссылка))
     await interaction.response.send_message("Нажмите кнопку ниже, чтобы открыть сайт и заполнить анкету:", view=v)
@@ -254,6 +258,19 @@ async def cmd_clear(interaction: discord.Interaction, количество: int)
 async def cmd_ping(interaction: discord.Interaction):
     await interaction.response.send_message(f"🏓 Pong: {round(bot.latency*1000)}ms")
 
+# ================= ЗАЩИТА ОТ ОШИБОК И ПАДЕНИЙ =================
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.errors.CheckFailure):
+        await interaction.response.send_message("❌ У вас нет прав модератора для использования этой команды!", ephemeral=True)
+    else:
+        print(f"[КРИТ] Ошибка в команде: {error}")
+        try:
+            await interaction.response.send_message("⚠️ Произошла внутренняя ошибка, но я выжил!", ephemeral=True)
+        except:
+            pass
+
 # ================= ВЕБ СЕРВЕР ДЛЯ WEBHOOK И HEALTH CHECK =================
 
 async def web_main():
@@ -262,7 +279,10 @@ async def web_main():
     app.router.add_post('/webhook', web_hook_handler)
     runner = web.AppRunner(app)
     await runner.setup()
-    await web.TCPSite(runner, '0.0.0.0', 10000).start()
+    
+    port = int(os.environ.get("PORT", 10000))
+    await web.TCPSite(runner, '0.0.0.0', port).start()
+    print(f"[WEB] Сервер запущен на динамическом порту {port}")
 
 async def web_hook_handler(request):
     try:
