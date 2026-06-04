@@ -51,17 +51,17 @@ class AdminFormReviewView(discord.ui.View):
             return
         guild = interaction.guild
         member = guild.get_member(self.applicant_id)
+        
+        r_cand = guild.get_role(1259813357763170394)
+        r_reg = guild.get_role(1259828977942528111)
+        r_play = guild.get_role(1506372814477988002)
+
         if member:
-            for r in ["Кандидат"]: 
-                role = discord.utils.get(guild.roles, name=r)
-                if role: await member.remove_roles(role)
-            for r in ["Игрок", "Зарегистрирован"]:
-                role = discord.utils.get(guild.roles, name=r)
-                if role: await member.add_roles(role)
-            try: 
-                await member.send("🎉 Ваша анкета одобрена!")
-            except: 
-                pass
+            if r_cand: await member.remove_roles(r_cand)
+            if r_play: await member.add_roles(r_play)
+            if r_reg: await member.add_roles(r_reg)
+            try: await member.send("🎉 Ваша анкета одобрена!")
+            except: pass
         await interaction.message.delete()
 
     @discord.ui.button(label="❌ Отказать", style=discord.ButtonStyle.red)
@@ -84,27 +84,41 @@ class AdminFormReviewView(discord.ui.View):
 # ================= СОБЫТИЯ =================
 
 @bot.event
+async def on_ready():
+    await init_db()
+    print(f"[OK] Бот запущен: {bot.user}")
+    await bot.tree.sync()
+    check_activity.start()
+    auto_cleanup_loop.start()
+
+@bot.event
+async def on_message(message):
+    if message.author.bot or not message.guild: 
+        return
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("INSERT OR REPLACE INTO member_activity VALUES (?, ?, 0, NULL)", (message.author.id, datetime.datetime.utcnow().isoformat()))
+        await db.commit()
+
+@bot.event
 async def on_member_join(member):
     guild = member.guild
     async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)")
+        await db.commit()
         async with db.execute("SELECT value FROM config WHERE key = 'reg_mode'") as c:
             row = await c.fetchone()
             mode = row[0] if row else "off"
             
-    # Ищем роли железно по их ID, которые ты скинул
-    r_cand = guild.get_role(1259813357763170394)   # Кандидат
-    r_reg = guild.get_role(1259828977942528111)    # Зарегистрирован
-    r_play = guild.get_role(1506372814477988002)   # Игрок
+    r_cand = guild.get_role(1259813357763170394)
+    r_reg = guild.get_role(1259828977942528111)
+    r_play = guild.get_role(1506372814477988002)
 
-    # ЕСЛИ РЕЖИМ АНКЕТ ВКЛЮЧЕН (on)
     if mode == "on":
         if r_cand: await member.add_roles(r_cand)
         if r_play: await member.remove_roles(r_play)
         if r_reg: await member.remove_roles(r_reg)
         try: await member.send("Привет! Наш сервер закрытого типа. Заполни анкету: https://sirionhub.online/")
         except: pass
-        
-    # ЕСЛИ РЕЖИМ АНКЕТ ВЫКЛЮЧЕН (off)
     else:
         if r_play: await member.add_roles(r_play)
         if r_reg: await member.add_roles(r_reg)
@@ -112,16 +126,14 @@ async def on_member_join(member):
         try: await member.send("Привет! Добро пожаловать на Sirion Hub! Тебе открыты все каналы.")
         except: pass
 
-    # Отправка эмбеда приветствия (если настроено)
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT channel_id, text, title, description, color FROM welcome_settings WHERE guild_id = ?", (guild.id,)) as c:
             w = await c.fetchone()
-            if w:
+            if w and guild.get_channel(w[0]):
                 ch = guild.get_channel(w[0])
-                if ch:
-                    txt = w[1].replace("{user_mention}", member.mention) if w[1] else None
-                    emb = discord.Embed(title=w[2], description=w[3].replace("{user_mention}", member.mention) if w[3] else "", color=int(w[4].replace("#",""),16) if w[4] else 0x00ff00) if (w[2] or w[3]) else None
-                    await ch.send(content=txt, embed=emb)
+                txt = w[1].replace("{user_mention}", member.mention) if w[1] else None
+                emb = discord.Embed(title=w[2], description=w[3].replace("{user_mention}", member.mention) if w[3] else "", color=int(w[4].replace("#",""),16) if w[4] else 0x00ff00) if (w[2] or w[3]) else None
+                await ch.send(content=txt, embed=emb)
 
 # ================= АВТОМАТИЧЕСКИЕ ТАСКИ =================
 
@@ -168,6 +180,9 @@ async def reg_mode(interaction: discord.Interaction, status: str):
     if not await is_mod(interaction): 
         return
     async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT)")
+        await db.commit()
+        
         if status == "status":
             async with db.execute("SELECT value FROM config WHERE key = 'reg_mode'") as c:
                 row = await c.fetchone()
