@@ -113,19 +113,18 @@ async def on_member_join(member):
     r_reg = guild.get_role(1259828977942528111)
     r_play = guild.get_role(1506372814477988002)
 
+    # ЕСЛИ РЕЖИМ АНКЕТ ВКЛЮЧЕН (on)
     if mode == "on":
         if r_cand: await member.add_roles(r_cand)
         if r_play: await member.remove_roles(r_play)
         if r_reg: await member.remove_roles(r_reg)
-        try: await member.send("Привет! Наш сервер закрытого типа. Заполни анкету: https://sirionhub.online/")
-        except: pass
+    # ЕСЛИ РЕЖИМ АНКЕТ ВЫКЛЮЧЕН (off)
     else:
         if r_play: await member.add_roles(r_play)
         if r_reg: await member.add_roles(r_reg)
         if r_cand: await member.remove_roles(r_cand)
-        try: await member.send("Привет! Добро пожаловать на Sirion Hub! Тебе открыты все каналы.")
-        except: pass
 
+    # Текст приветствия в текстовый канал сервера (если настроено командой /приветствие)
     async with aiosqlite.connect(DB_NAME) as db:
         async with db.execute("SELECT channel_id, text, title, description, color FROM welcome_settings WHERE guild_id = ?", (guild.id,)) as c:
             w = await c.fetchone()
